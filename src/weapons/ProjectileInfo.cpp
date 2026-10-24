@@ -312,9 +312,10 @@ CProjectileInfo::Update()
 			if (gaProjectileInfo[i].m_eWeaponType == WEAPONTYPE_ROCKET) {
 				CVector pos = ms_apProjectile[i]->GetPosition();
 				CWorld::pIgnoreEntity = ms_apProjectile[i];
+                const bool sharedHeliHit=vccoop::Active() && CHeli::TestRocketCollision(&pos,gaProjectileInfo[i].m_pSource);
 				if (ms_apProjectile[i]->bHasCollided
 					|| !CWorld::GetIsLineOfSightClear(gaProjectileInfo[i].m_vecPos, pos, true, true, true, true, false, false)
-					|| CHeli::TestRocketCollision(&pos) || CPlane::TestRocketCollision(&pos)) {
+					|| sharedHeliHit || (!vccoop::Active() && CHeli::TestRocketCollision(&pos,gaProjectileInfo[i].m_pSource)) || CPlane::TestRocketCollision(&pos)) {
 					RemoveProjectile(&gaProjectileInfo[i], ms_apProjectile[i]);
 				}
 				CWorld::pIgnoreEntity = nil;

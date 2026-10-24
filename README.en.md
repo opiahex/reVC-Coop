@@ -1,7 +1,7 @@
 # reVC-Coop
 
-![Version](https://img.shields.io/badge/version-0.2.7-ff81b7)
-[![Checks](https://img.shields.io/badge/checks-390%20passed-65ded2)](MIGRATION.md)
+![Version](https://img.shields.io/badge/version-0.2.8-ff81b7)
+[![Checks](https://img.shields.io/badge/checks-491%20passed-65ded2)](MIGRATION.md)
 ![GTA Vice City](https://img.shields.io/badge/GTA-Vice%20City-ff81b7)
 [![Licences](https://img.shields.io/badge/license-notices-65ded2)](#base-and-third-party-code)
 
@@ -11,7 +11,7 @@ Cooperative multiplayer for **GTA Vice City**, built directly into the reVC engi
 
 ## Players
 
-Running, jumping, weapon changes, shooting and shot effects. Your teammate has a name tag, health and armour bars, a weapon icon and their wanted stars. Each player keeps their own wanted level; NPCs react to aiming, gunfire and hits from both players.
+Running, jumping, weapon changes, shooting and shot effects. Your teammate has a name tag, health and armour bars, a weapon icon and their wanted stars. Each player keeps their own wanted level; NPCs react to aiming, gunfire and hits from both players. One player's death or arrest does not reset their teammate's world.
 
 ![A teammate in the shared world — host view](assets/players.png)
 

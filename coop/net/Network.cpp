@@ -166,6 +166,44 @@ void Server::Receive(ENetPeer* peer,const ENetEvent& event) {
         if(event.channelID || ++p.pickups>1024 || m.kind==Kind::PickupGrant || m.kind==Kind::PickupState) {Reject(peer,Reason::Protocol);return;}
         ReceivePickup(peer,p,m);return;
     }
+    if(m.kind==Kind::HeliHit && p.id<kMaxPlayers && event.channelID==0) {
+        if(++p.shots>600) {Reject(peer,Reason::RateLimit);return;}
+        auto& h=m.heli;auto it=entities_.find(h.target);if(it==entities_.end()) return;auto& target=it->second;const auto& e=target.state;
+        Vec3 origin;uint8_t area;
+        if(e.generation!=h.generation || e.kind!=EntityKind::Vehicle || e.model!=165 || target.heliRewarded || target.heliCommittedDown || e.vehicle.heliStatus==3
+            || !AttackOrigin(p,h.source,h.sourceGeneration,origin,area) || e.area!=area || (!h.source && h.sourceLife!=p.lastState.state.life)) return;
+        auto point=EntityPosition(e);float dx=origin.x-point.x,dy=origin.y-point.y,dz=origin.z-point.z;
+        float x=h.point.x-point.x,y=h.point.y-point.y,z=h.point.z-point.z;
+        if(dx*dx+dy*dy+dz*dz>1500*1500 || x*x+y*y+z*z>12*12) return;
+        if(!h.source) {target.heliAttacker=p.id;target.heliEpoch=p.epoch;target.heliLife=h.sourceLife;}
+        else for(const auto& [peer,driver]:peers_) if(driver.hasState && driver.lastState.state.vehicle==h.source && driver.lastState.state.seat==0) {
+            target.heliAttacker=driver.id;target.heliEpoch=driver.epoch;target.heliLife=driver.lastState.state.life;break;
+        }
+        if(h.mode || (target.heliDamage+=h.damage)>700) target.heliCommittedDown=true;
+        m.sender=p.id;m.epoch=p.epoch;Broadcast(m);return;
+    }
+    if(m.kind==Kind::HeliDown && p.id<kMaxPlayers && event.channelID==0) {
+        auto it=entities_.find(m.heli.target);if(it==entities_.end())return;auto& entry=it->second;const auto& e=entry.state;
+        if(e.owner!=p.id || e.ownerEpoch!=p.epoch || e.generation!=m.heli.generation || e.model!=165 || e.kind!=EntityKind::Vehicle || entry.heliRewarded || !entry.heliCommittedDown || e.vehicle.heliStatus!=3) return;
+        entry.heliRewarded=true;
+        for(const auto& [peer,target]:peers_) if(target.id==entry.heliAttacker && target.epoch==entry.heliEpoch && target.hasState && target.lastState.state.life==entry.heliLife) {
+            Message reward;reward.kind=Kind::HeliReward;reward.heli=m.heli;reward.hit.targetEpoch=target.epoch;reward.hit.life=entry.heliLife;SendPacket(peer,reward);break;
+        }
+        return;
+    }
+    if(m.kind==Kind::Arrest && p.id<kMaxPlayers && event.channelID==0) {
+        if(++p.crimes>120) {Reject(peer,Reason::RateLimit);return;}
+        const auto& a=m.arrest;auto it=entities_.find(a.cop);if(it==entities_.end()) return;
+        const auto& e=it->second.state;
+        if(e.kind!=EntityKind::Ped || e.ped.pedType!=6 || e.ped.health<=0 || e.owner!=p.id || e.ownerEpoch!=p.epoch || e.generation!=a.generation) return;
+        for(auto& [target,t]:peers_) if(t.id==a.target && t.epoch==a.epoch && t.hasState && (t.lastState.state.flags&kReady)
+            && t.lastState.state.life==a.life && t.lastState.state.health>0 && t.lastState.state.wanted && t.lastState.state.area==e.area) {
+            auto x=t.lastState.state.position,y=EntityPosition(e);float dx=x.x-y.x,dy=x.y-y.y,dz=x.z-y.z;
+            if(dx*dx+dy*dy+dz*dz>36 || t.arrestedLife==a.life) return;
+            t.arrestedLife=a.life;m.sender=p.id;m.epoch=p.epoch;SendPacket(target,m);return;
+        }
+        return;
+    }
     if(m.kind==Kind::Crime && p.id<kMaxPlayers && event.channelID==0) {
         if(++p.crimes>120) {Reject(peer,Reason::RateLimit);return;}
         const auto& c=m.crime;
@@ -544,6 +582,9 @@ void Client::Receive(std::span<const uint8_t> bytes,uint8_t channel) {
         if(it==entities_.end() && entities_.size()>=kMaxEntities) { Fail("Entity limit exceeded"); return; }
         entities_[e.id]={e,0,NowMs()}; return;
     }
+    if(m.kind==Kind::HeliReward) {
+        if(status_==Connection::Online && !channel && m.sender==kNoPlayer && !m.epoch && m.hit.targetEpoch==players_[self_].epoch) events_.push_back({NowMs(),m});return;
+    }
     if(m.kind==Kind::PickupState || m.kind==Kind::PickupGrant) {
         if(status_!=Connection::Online || channel || m.sender!=kNoPlayer || m.epoch) return;
         if(m.kind==Kind::PickupGrant) {
@@ -555,11 +596,12 @@ void Client::Receive(std::span<const uint8_t> bytes,uint8_t channel) {
         if(it==pickups_.end() || Newer(m.pickup.revision,it->second.revision)) pickups_[m.pickup.id]=m.pickup;
         return;
     }
-    if (m.kind==Kind::Hit || m.kind==Kind::Shot || m.kind==Kind::Explosion || m.kind==Kind::EntityHit || m.kind==Kind::VehicleContact || m.kind==Kind::Crime) {
+    if (m.kind==Kind::Hit || m.kind==Kind::Shot || m.kind==Kind::Explosion || m.kind==Kind::EntityHit || m.kind==Kind::VehicleContact || m.kind==Kind::Crime || m.kind==Kind::Arrest || m.kind==Kind::HeliHit) {
         if (status_!=Connection::Online || channel!=0 || m.sender>=kMaxPlayers) { Fail("Invalid event sender"); return; }
         const auto& p=players_[m.sender];
         if (!p.active || p.epoch!=m.epoch) return;
         if (m.kind==Kind::Hit && (m.hit.target!=self_ || m.hit.targetEpoch!=players_[self_].epoch)) return;
+        if(m.kind==Kind::Arrest && (m.arrest.target!=self_ || m.arrest.epoch!=players_[self_].epoch)) return;
         if(m.kind==Kind::Crime && (m.crime.target!=self_ || m.crime.epoch!=players_[self_].epoch)) return;
         if (events_.size()>=8192) { Fail("Game event queue overflow"); return; }
         events_.push_back({NowMs(),m}); return;
@@ -634,7 +676,7 @@ bool Client::SendChat(const std::string& text) {
     Message m; m.kind=Kind::Chat; m.text=text; return SendPacket(server_,m);
 }
 bool Client::SendEvent(const Message& event) {
-    if (status_!=Connection::Online || (event.kind!=Kind::PickupCreate && event.kind!=Kind::PickupRequest && event.kind!=Kind::PickupRemove && event.kind!=Kind::Crime && event.kind!=Kind::Environment && event.kind!=Kind::Hit && event.kind!=Kind::Shot && event.kind!=Kind::Explosion && event.kind!=Kind::EntityHit && event.kind!=Kind::VehicleContact && event.kind!=Kind::MissionState && event.kind!=Kind::MissionCommand && event.kind!=Kind::MissionBarrier && event.kind!=Kind::MissionReady && event.kind!=Kind::MissionVote && event.kind!=Kind::Radar)
+    if (status_!=Connection::Online || (event.kind!=Kind::PickupCreate && event.kind!=Kind::PickupRequest && event.kind!=Kind::PickupRemove && event.kind!=Kind::Crime && event.kind!=Kind::Arrest && event.kind!=Kind::HeliHit && event.kind!=Kind::HeliDown && event.kind!=Kind::Environment && event.kind!=Kind::Hit && event.kind!=Kind::Shot && event.kind!=Kind::Explosion && event.kind!=Kind::EntityHit && event.kind!=Kind::VehicleContact && event.kind!=Kind::MissionState && event.kind!=Kind::MissionCommand && event.kind!=Kind::MissionBarrier && event.kind!=Kind::MissionReady && event.kind!=Kind::MissionVote && event.kind!=Kind::Radar)
         || (event.kind==Kind::Hit && !ValidHit(event.hit)) || (event.kind==Kind::Shot && !ValidShot(event.shot))) return false;
     auto m=event; m.sender=kNoPlayer; m.epoch=0;if(m.kind==Kind::Environment) {if(self_!=host_) return false;m.sequence=++sequence_;} Message parsed;
     if(!Decode(Encode(m),parsed)) return false;

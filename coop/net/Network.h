@@ -22,7 +22,7 @@ class Server {
     struct Peer {
         uint8_t id{kNoPlayer}; bool rejected{},hasState{};
         std::string name; uint64_t connected{},window{}; unsigned states{},controls{};
-        uint32_t sequence{},epoch{}; Message lastState{};
+        uint32_t sequence{},epoch{},arrestedLife{}; Message lastState{};
         uint64_t chatWindow{}; unsigned chats{};
         unsigned hits{},shots{},entityUpdates{},entityControls{},missionEvents{},clocks{},crimes{},pickups{};
     };
@@ -30,7 +30,7 @@ class Server {
     std::map<ENetPeer*,Peer> peers_;
     uint8_t host_{kNoPlayer}; uint32_t nextEpoch_{};
     struct SeatLease { uint8_t player{kNoPlayer}; uint32_t epoch{}; uint64_t until{}; };
-    struct SharedEntity { Entity state; uint32_t sequence{}; uint64_t updated{},claimUntil{}; std::array<SeatLease,9> seats{}; };
+    struct SharedEntity { Entity state; uint32_t sequence{}; uint64_t updated{},claimUntil{}; std::array<SeatLease,9> seats{};uint8_t heliAttacker{kNoPlayer};uint32_t heliEpoch{},heliLife{};bool heliRewarded{},heliCommittedDown{};uint32_t heliDamage{}; };
     std::map<uint32_t,SharedEntity> entities_;
     uint32_t nextEntity_{},nextPickup_{};
     struct SharedPickup {Pickup state;uint64_t deadline{};};

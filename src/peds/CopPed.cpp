@@ -111,12 +111,19 @@ CCopPed::SetArrestPlayer(CPed *player)
 {
 	if (!IsPedInControl() || !player)
 		return;
+    if(vccoop::RouteArrest(this,player)) return;
+    ApplyArrest(player);
+}
 
+void
+CCopPed::ApplyArrest(CPed* player)
+{
+    if(!player || !player->IsPlayer() || player->DyingOrDead()) return;
 	player->Say(SOUND_PED_PLAYER_REACTTOCOP);
 	Say(SOUND_PED_ARREST_COP);
 
 	if (player->EnteringCar()) {
-		if (CTimer::GetTimeInMilliseconds() > m_nPedStateTimer)
+		if (CTimer::GetTimeInMilliseconds() > m_nPedStateTimer && !(vccoop::Active() && player!=vccoop::LocalPlayer()))
 			return;
 
 		// why?

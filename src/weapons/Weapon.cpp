@@ -1009,7 +1009,7 @@ CWeapon::FireInstantHit(CEntity *shooter, CVector *fireSource)
 			rotSpeed = 4;
 
 		CVector bulletPos;
-		if ( CHeli::TestBulletCollision(&source, &target, &bulletPos, 4) )
+		if ( CHeli::TestBulletCollision(&source, &target, &bulletPos, 4, shooter) )
 		{
 			for ( int32 i = 0; i < 16; i++ )
 				CParticle::AddParticle(PARTICLE_SPARK, bulletPos, CVector(0.0f, 0.0f, 0.0f), nil, 0.0f, rotSpeed);
@@ -1050,7 +1050,7 @@ CWeapon::FireInstantHit(CEntity *shooter, CVector *fireSource)
 				rotSpeed = 4;
 
 			CVector bulletPos;
-			if (CHeli::TestBulletCollision(fireSource, &target, &bulletPos, 4))
+			if (CHeli::TestBulletCollision(fireSource, &target, &bulletPos, 4, shooter))
 			{
 				for (int32 i = 0; i < 16; i++)
 					CParticle::AddParticle(PARTICLE_SPARK, bulletPos, CVector(0.0f, 0.0f, 0.0f), nil, 0.0f, rotSpeed);
@@ -1083,7 +1083,7 @@ CWeapon::FireInstantHit(CEntity *shooter, CVector *fireSource)
 				rotSpeed = 4;
 
 			CVector bulletPos;
-			if (CHeli::TestBulletCollision(fireSource, &target, &bulletPos, 4))
+			if (CHeli::TestBulletCollision(fireSource, &target, &bulletPos, 4, shooter))
 			{
 				for (int32 i = 0; i < 16; i++)
 					CParticle::AddParticle(PARTICLE_SPARK, bulletPos, CVector(0.0f, 0.0f, 0.0f), nil, 0.0f, rotSpeed);
@@ -2443,7 +2443,7 @@ CWeapon::FireM16_1stPerson(CEntity *shooter)
 
 	CVector bulletPos;
 
-	if ( CHeli::TestBulletCollision(&source, &target, &bulletPos, (m_eWeaponType == WEAPONTYPE_M60 || m_eWeaponType == WEAPONTYPE_HELICANNON ? 20 : 4)) )
+	if ( CHeli::TestBulletCollision(&source, &target, &bulletPos, (m_eWeaponType == WEAPONTYPE_M60 || m_eWeaponType == WEAPONTYPE_HELICANNON ? 20 : 4), shooter) )
 	{
 		for ( int32 i = 0; i < 16; i++ )
 			CParticle::AddParticle(PARTICLE_SPARK, bulletPos, CVector(0.0f, 0.0f, 0.0f));
@@ -3021,8 +3021,9 @@ CWeapon::Update(int32 audioEntity, CPed *pedToAdjustSound)
 }
 
 void
-FireOneInstantHitRound(CVector *source, CVector *target, int32 damage)
+FireOneInstantHitRound(CVector *source, CVector *target, int32 damage,CEntity* shooter)
 {
+    vccoop::CombatScope coopSource(shooter);
 	ASSERT(source!=nil);
 	ASSERT(target!=nil);
 
@@ -3032,11 +3033,12 @@ FireOneInstantHitRound(CVector *source, CVector *target, int32 damage)
 		*source, CVector(0.0f, 0.0f, 0.0f), 5.0f,
 		1.0f, 0.8f, 0.0f, CPointLights::FOG_NONE, false);
 
-	CColPoint point;
+	CColPoint point{};
 	CEntity *victim;
 	CWorld::ProcessLineOfSight(*source, *target, point, victim, true, true, true, true, true, true, false);
 
 	CParticle::AddParticle(PARTICLE_HELI_ATTACK, *source, ((*target) - (*source)) * 0.15f);
+    vccoop::RecordShot(shooter,victim,WEAPONTYPE_HELICANNON,*source,victim?point.point:*target,point.normal,point.surfaceB,point.pieceB);
 
 	if ( victim )
 	{
@@ -3057,7 +3059,7 @@ FireOneInstantHitRound(CVector *source, CVector *target, int32 damage)
 				asoc->blendAmount = 0.0f;
 				asoc->blendDelta  = 8.0f;
 
-				victimPed->InflictDamage(nil, WEAPONTYPE_UZI, damage, (ePedPieceTypes)point.pieceB, localDir);
+				victimPed->InflictDamage(shooter, WEAPONTYPE_UZI, damage, (ePedPieceTypes)point.pieceB, localDir);
 
 				pos.z += 0.8f;
 
@@ -3079,7 +3081,7 @@ FireOneInstantHitRound(CVector *source, CVector *target, int32 damage)
 			}
 		}
 		else if ( victim->IsVehicle() )
-			((CVehicle *)victim)->InflictDamage(nil, WEAPONTYPE_UZI, damage);
+			((CVehicle *)victim)->InflictDamage(shooter, WEAPONTYPE_UZI, damage);
 		//BUG ? no CGlass::WasGlassHitByBullet
 
 		switch ( victim->GetType() )

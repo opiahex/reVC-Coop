@@ -3,6 +3,7 @@
 #include "common/VehicleMotion.h"
 #include "common/FrameLimit.h"
 #include "common/FixedStep.h"
+#include "common/Helicopter.h"
 #include "common/SpawnSearch.h"
 #include "net/BackgroundClient.h"
 #include "ui/Renderer.h"
@@ -317,6 +318,79 @@ LRESULT CALLBACK ChatProc(HWND h,UINT m,WPARAM w,LPARAM l) {
     if(vc::ui::Hud().ProcessMessage(h,m,w,l)) return 0;
     return DefWindowProcW(h,m,w,l);
 }
+void HeliCombatNetworking() {
+    Check(vc::HeliSearchlight(0)==1 && vc::HeliSearchlight(40)==1,"near helicopter searchlight");
+    Check(vc::HeliSearchlight(50)==.5f,"helicopter searchlight increased above one while fading");
+    Check(vc::HeliSearchlight(60)==0 && vc::HeliSearchlight(1000)==0,"distant helicopter searchlight");
+
+    vc::Message wire;wire.kind=vc::Kind::HeliHit;wire.heli={1,2,0,0,3,0,20,{350,-900,40}};vc::Message decoded;
+    Check(vc::Decode(vc::Encode(wire),decoded) && decoded.heli.sourceLife==3 && decoded.heli.damage==20,"helicopter hit wire");
+    wire.heli.damage=21;Check(!vc::Decode(vc::Encode(wire),decoded),"unbounded special helicopter damage accepted");wire.heli.damage=20;
+    wire.heli.mode=3;Check(!vc::Decode(vc::Encode(wire),decoded),"invalid helicopter hit mode accepted");wire.heli.mode=0;
+    wire.heli.source=5;Check(!vc::Decode(vc::Encode(wire),decoded),"unversioned helicopter shooter accepted");
+    vc::Entity visual;visual.key=990;visual.kind=vc::EntityKind::Vehicle;visual.model=165;visual.vehicle.heliComponents=24;visual.vehicle.heliDamage=704;
+    vc::Message poseWire;poseWire.kind=vc::Kind::EntityUpdate;poseWire.entity=visual;
+    Check(vc::Decode(vc::Encode(poseWire),decoded) && decoded.entity.vehicle.heliComponents==24 && decoded.entity.vehicle.heliDamage==704,"helicopter damage/components wire");
+    visual.vehicle.heliComponents=1;Check(!vc::ValidEntity(visual),"invalid helicopter component bit accepted");
+    vc::NetworkRuntime runtime;Check(runtime.Ok(),"helicopter runtime");vc::Server server;Check(server.Start(0,"127.0.0.1"),"helicopter server");vc::BackgroundClient host,guest;
+    auto until=[&](auto predicate){auto end=vc::NowMs()+4000;do{server.Poll();if(predicate())return true;Sleep(2);}while(vc::NowMs()<end);return false;};
+    host.Connect("127.0.0.1",server.Port(),"HeliOwner");Check(until([&]{return host.Read().status==vc::Connection::Online;}),"helicopter owner connected");
+    guest.Connect("127.0.0.1",server.Port(),"Gunner");Check(until([&]{return guest.Read().status==vc::Connection::Online;}),"helicopter gunner connected");
+    auto hs=host.Read().self,gs=guest.Read().self;vc::PlayerState pose;pose.flags=vc::kReady;pose.position={350,-900,11};host.Publish(pose);guest.Publish(pose);
+    Check(until([&]{return host.Read().players[gs].hasState && guest.Read().players[hs].hasState;}),"helicopter shooters ready");
+    vc::Message create;create.kind=vc::Kind::EntityCreate;create.entity.key=990;create.entity.model=165;create.entity.vehicle.transform.position={350,-900,40};
+    Check(host.SendEntity(create),"helicopter create queued");uint32_t id=0;
+    Check(until([&]{for(auto& [key,e]:host.Read().entities)if(e.state.key==990)id=key;return id && guest.Read().entities.contains(id);}),"helicopter baseline");
+    vc::Message hit;hit.kind=vc::Kind::HeliHit;hit.heli={id,1,0,0,1,0,20,{350,-900,40}};
+    auto hits=[&](){unsigned n=0;for(auto& e:host.TakeEvents())if(e.message.kind==vc::Kind::HeliHit)++n;return n;};
+    auto settle=[&](){for(int i=0;i<60;++i){server.Poll();Sleep(2);}};
+    auto stale=hit;stale.heli.generation=2;Check(guest.SendEvent(stale),"stale heli hit queued");stale=hit;stale.heli.sourceLife=2;Check(guest.SendEvent(stale),"stale heli shooter queued");stale=hit;stale.heli.point.x+=100;Check(guest.SendEvent(stale),"invalid heli impact queued");settle();Check(hits()==0,"invalid heli hit affected owner");
+    Check(guest.SendEvent(hit),"guest helicopter bullet queued");Check(until([&]{return hits()==1;}),"guest helicopter bullet not delivered");
+    vc::Message down;down.kind=vc::Kind::HeliDown;down.heli.target=id;down.heli.generation=1;
+    auto rewards=[&](vc::BackgroundClient& c){unsigned n=0;for(auto& e:c.TakeEvents())if(e.message.kind==vc::Kind::HeliReward)++n;return n;};
+    Check(host.SendEvent(down),"premature helicopter destruction queued");settle();Check(rewards(guest)==0,"intact heli gave kill reward");
+    for(int i=0;i<35;++i)Check(guest.SendEvent(hit),"helicopter burst queued");unsigned accepted=0;Check(until([&]{accepted+=hits();return accepted==35;}),"helicopter burst not delivered");
+    Check(guest.SendEvent(hit),"late helicopter hit queued");settle();Check(hits()==0,"late hit overwrote fatal-shot credit");
+    auto e=host.Read().entities.at(id).state;e.vehicle.heliStatus=3;e.vehicle.heliDamage=720;host.PublishEntities({e});
+    Check(until([&]{return guest.Read().entities.at(id).state.vehicle.heliStatus==3;}),"shot-down helicopter state");
+    Check(guest.SendEvent(down),"non-owner helicopter destruction queued");settle();Check(rewards(guest)==0,"non-owner helicopter kill rewarded");
+    Check(host.SendEvent(down),"owner helicopter destruction queued");unsigned paid=0;Check(until([&]{paid+=rewards(guest);return paid==1;}),"guest helicopter kill reward missing");
+    Check(rewards(host)==0,"host received guest helicopter reward");Check(host.SendEvent(down),"duplicate helicopter destruction queued");settle();Check(rewards(guest)==0,"helicopter reward duplicated");
+    host.Stop();guest.Stop();
+}
+void ArrestNetworking() {
+    vc::Message wire;wire.kind=vc::Kind::Arrest;wire.arrest={1,2,3,4,5};vc::Message decoded;
+    Check(vc::Decode(vc::Encode(wire),decoded) && decoded.arrest.generation==5 && decoded.arrest.life==3,"arrest identity wire roundtrip");
+    wire.arrest.generation=0;Check(!vc::Decode(vc::Encode(wire),decoded),"unversioned cop arrest accepted");
+    vc::PlayerState before,after;after.pedState=63;Check(vc::CriticalTransition(before,after),"arrest transition sent unreliably");
+    vc::NetworkRuntime runtime;Check(runtime.Ok(),"arrest runtime");vc::Server server;Check(server.Start(0,"127.0.0.1"),"arrest server");
+    vc::BackgroundClient host,guest;host.Connect("127.0.0.1",server.Port(),"CopOwner");
+    auto until=[&](auto predicate){auto end=vc::NowMs()+4000;do{server.Poll();if(predicate())return true;Sleep(2);}while(vc::NowMs()<end);return false;};
+    Check(until([&]{return host.Read().status==vc::Connection::Online;}),"arrest owner connected");
+    guest.Connect("127.0.0.1",server.Port(),"Suspect");
+    Check(until([&]{return guest.Read().status==vc::Connection::Online;}),"arrest suspect connected");
+    auto hs=host.Read().self,gs=guest.Read().self;vc::PlayerState pose;pose.flags=vc::kReady;pose.position={350,-900,11};host.Publish(pose);guest.Publish(pose);
+    Check(until([&]{return host.Read().players[gs].hasState && guest.Read().players[hs].hasState;}),"arrest players ready");
+    vc::Message cop;cop.kind=vc::Kind::EntityCreate;cop.entity.key=550;cop.entity.kind=vc::EntityKind::Ped;cop.entity.model=1;cop.entity.ped=pose;cop.entity.ped.model=1;cop.entity.ped.pedType=6;
+    Check(host.SendEntity(cop),"native cop create queued");uint32_t id=0;
+    Check(until([&]{for(auto& [key,e]:host.Read().entities)if(e.state.key==550)id=key;return id && guest.Read().entities.contains(id);}),"native cop baseline");
+    auto claim=[&](vc::BackgroundClient& client,uint32_t life,uint32_t generation) {vc::Message m;m.kind=vc::Kind::Arrest;m.arrest={gs,guest.Read().players[gs].epoch,life,id,generation};Check(client.SendEvent(m),"arrest queued");};
+    auto drain=[&](){unsigned count=0;for(auto& e:guest.TakeEvents())if(e.message.kind==vc::Kind::Arrest)++count;return count;};
+    auto settle=[&](){for(int i=0;i<60;++i){server.Poll();Sleep(2);}};
+    claim(host,1,1);settle();Check(drain()==0,"innocent player arrested");
+    pose.wanted=2;guest.Publish(pose);Check(until([&]{return host.Read().players[gs].state.wanted==2;}),"suspect wanted delivered");
+    claim(guest,1,1);settle();Check(drain()==0,"non-owner cop arrest accepted");
+    claim(host,2,1);claim(host,1,2);settle();Check(drain()==0,"stale life/generation arrest accepted");
+    auto distant=pose;distant.position.x+=30;guest.Publish(distant);Check(until([&]{return host.Read().players[gs].state.position.x==distant.position.x;}),"distant suspect delivered");
+    claim(host,1,1);settle();Check(drain()==0,"distant suspect arrested");
+    guest.Publish(pose);Check(until([&]{return host.Read().players[gs].state.position.x==pose.position.x;}),"suspect returned");
+    claim(host,1,1);unsigned arrests=0;Check(until([&]{arrests+=drain();return arrests>0;}),"owned cop arrest not delivered");
+    claim(host,1,1);settle();Check(arrests+drain()==1,"arrest replay delivered twice");
+    pose.life=2;guest.Publish(pose);Check(until([&]{return host.Read().players[gs].state.life==2;}),"respawn life delivered");
+    claim(host,1,1);settle();Check(drain()==0,"old arrest affected respawned suspect");
+    claim(host,2,1);Check(until([&]{return drain()==1;}),"new life could not be arrested");
+    host.Stop();guest.Stop();
+}
 void PickupNetworking() {
     vc::Pickup universal;universal.area=13;universal.position={350,-900,11};
     Check(vc::PickupRespawnBlocked(universal,{350,-900,11},0),"everywhere pickup respawned under player");
@@ -411,6 +485,6 @@ void Graphics() {
 }
 }
 int main() {
-    try { Wire(); InteractionWire(); SkeletonPose(); SnapshotPlayback(); NetworkClock(); FixedSimulation(); VehicleMotion(); FrameLimits(); SpawnSearch(); Networking(); PickupNetworking(); Graphics(); std::cout<<checks<<" checks passed (wire, live UDP, Cyrillic D3D9 pixels and render state)\n"; return 0; }
+    try { Wire(); InteractionWire(); SkeletonPose(); SnapshotPlayback(); NetworkClock(); FixedSimulation(); VehicleMotion(); FrameLimits(); SpawnSearch(); Networking(); HeliCombatNetworking(); ArrestNetworking(); PickupNetworking(); Graphics(); std::cout<<checks<<" checks passed (wire, live UDP, Cyrillic D3D9 pixels and render state)\n"; return 0; }
     catch(const std::exception& e) { std::cerr<<"FAILED after "<<checks<<" checks: "<<e.what()<<"\n"; return 1; }
 }

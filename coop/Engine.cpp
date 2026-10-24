@@ -59,9 +59,13 @@
 #include "Font.h"
 #include "Pickups.h"
 #include "CopPed.h"
+#include "Heli.h"
+#include "Collision.h"
+#include "Stats.h"
 #include "EventList.h"
 #include <map>
 #include <tuple>
+#include <set>
 #include "RpAnimBlend.h"
 #include <d3d9.h>
 
@@ -89,13 +93,14 @@ struct Actor {
     std::map<std::tuple<unsigned,uint32_t,unsigned>,uint64_t> crimes;
     uint64_t wantedUntil{};unsigned pendingWanted{};
     int32 handle{-1},blip{-1};
-    uint64_t generation{}; uint32_t sequence{}; vc::Interpolator track;
+    uint64_t generation{},arrestSent{}; uint32_t sequence{},life{}; vc::Interpolator track;
 };
 struct App {
     vc::NetworkRuntime runtime; // Must outlive both server and transport worker.
     vc::Server server;
     vc::BackgroundClient network;
     NativePickups pickups;
+    std::optional<vc::Message> pendingArrest;uint64_t arrestWaitUntil{};
     NativeWorld world; uint32_t worldFrame{UINT32_MAX};
     vc::BackgroundClient::Snapshot snapshot;
     std::array<Actor,vc::kMaxPlayers> actors;
@@ -105,11 +110,11 @@ struct App {
     bool sandbox{},autoConnect{},autoHost{},loading{},worldReady{},initialised{},shutdown{};
     uint64_t lastPump{},lastLog{},lastCommand{};std::string commandResult;CVector probePoint{};
     uint64_t environmentSent{},environmentGeneration{},renderFrames{};uint32_t thunderSerial{},lastThunderAt{},appliedThunder{};
-    uint32_t life{1}; float previousHealth{100}; bool applyingDamage{},replayingExplosion{},explosionDamage{};uint64_t explosionsSent{},explosionsReplayed{};
+    uint32_t life{1},arrestedLife{};uint64_t arrestsApplied{},respawns{},heliHits{},heliRewards{};std::set<std::pair<uint32_t,uint32_t>> rewardedHelis; bool applyingDamage{},replayingExplosion{},explosionDamage{};uint64_t explosionsSent{},explosionsReplayed{};
     CPlayerPed* aiFocus{}; CPhysical* aiWitness{};uint64_t aiShots{},aiAimChecks{},crimeReports{},crimesApplied{};uint64_t aimScanAt{};
     CEntity* combatSource{}; uint64_t shotsSent{},shotsReplayed{},hitsSent{},hitsApplied{};
     bool captureFrame{};uint64_t testDriveUntil{},testLockUntil{},testCameraUntil{},testTraceUntil{}; int testGas{},testSteer{};
-    uint64_t testMoveUntil{},testJumpUntil{},testFireUntil{},testAimUntil{};int testForward{},testSide{};bool testSprint{};
+    uint64_t testMoveUntil{},testJumpUntil{},testFireUntil{},testAimUntil{};uint64_t testTrackUntil{};uint32_t testTrackEntity{};int testForward{},testSide{};bool testSprint{};
     uint64_t recordUntil{},recordNext{};unsigned recordInterval{100},recordIndex{};std::string recordPath;std::ofstream recordManifest;
     vc::SessionFrameLimit frameLimit;int onlineFrameLimit{vc::kDefaultOnlineFps};
     std::vector<std::pair<int32_t,CPed*>> testPeds;
@@ -168,7 +173,7 @@ void Initialise() {
     vc::ui::Hud().Configure(a.ini); vc::ui::Hud().onAction=Action;
     a.network.Start();
     a.world.log=Log;
-    Log("VC:COOP reVC 0.2.7 source adapter started protocol=20");
+    Log("VC:COOP reVC 0.2.8 source adapter started protocol=22");
 }
 void Pump() {
     Initialise(); auto& a=State(); if(a.shutdown) return;
@@ -178,7 +183,7 @@ void Pump() {
         Log("connection="+std::to_string(int(a.snapshot.status))+" self="+std::to_string(a.snapshot.self)+" host="+std::to_string(a.snapshot.host)+" "+a.snapshot.error);
         a.lastStatus=a.snapshot.status;
         if(a.lastStatus==vc::Connection::Offline) {
-            a.pickups.Clear();a.world.Clear();
+            a.rewardedHelis.clear();a.pendingArrest.reset();a.pickups.Clear();a.world.Clear();
             for(auto& actor:a.actors) ClearActor(actor);
             a.worldReady=false;
         }
@@ -330,7 +335,7 @@ void Animations(CPed* p,const vc::PlayerState& s) {
 bool SpawnLocation(CPlayerPed* p,CVector anchor,float heading,CVector& output) {
     auto& a=State();
     std::vector<vc::Vec3> occupied;
-    for(const auto& other:a.snapshot.players) if(other.active && other.hasState && (other.state.flags&vc::kReady)) occupied.push_back(other.state.position);
+    for(const auto& other:a.snapshot.players) if(other.active && other.hasState && other.state.area==CGame::currArea && (other.state.flags&vc::kReady)) occupied.push_back(other.state.position);
     auto result=vc::FindNearbySpawn({anchor.x,anchor.y,anchor.z},heading,occupied,[&](vc::Vec3 candidate,vc::Vec3& grounded) {
         CColPoint hit; CEntity* entity=nullptr;
         if(!CWorld::ProcessVerticalLine(CVector(candidate.x,candidate.y,anchor.z+1.f),anchor.z-3.f,hit,entity,true,false,false,true,false,false,nullptr) || hit.normal.z<.6f) return false;
@@ -405,7 +410,7 @@ void ApplyRemote(unsigned id) {
     if(id==a.snapshot.self || !remote.active || !remote.hasState || !(remote.state.flags&vc::kReady) || vc::NowMs()-remote.received>3000) {
         if(actor.ped) ClearActor(actor); return;
     }
-    if(actor.generation!=remote.generation || (actor.ped && CPools::GetPed(actor.handle)!=actor.ped)) ClearActor(actor);
+    if(actor.generation!=remote.generation || (actor.ped && (CPools::GetPed(actor.handle)!=actor.ped || actor.life!=remote.state.life))) ClearActor(actor);
     if(actor.sequence!=remote.sequence || actor.track.Empty()) {
         actor.track.Push(double(remote.received)*.001,remote.state,double(vc::NowMs())*.001); actor.sequence=remote.sequence;
     }
@@ -419,7 +424,7 @@ void ApplyRemote(unsigned id) {
         if(!actor.ped) return;
         actor.ped->SetPosition(CVector(s.position.x,s.position.y,s.position.z));
         actor.ped->m_area=s.area; CWorld::Add(actor.ped);
-        actor.handle=CPools::GetPedRef(actor.ped); actor.generation=remote.generation;
+        actor.handle=CPools::GetPedRef(actor.ped); actor.generation=remote.generation;actor.life=s.life;
         actor.blip=CRadar::SetEntityBlip(BLIP_CHAR,actor.handle,id==0?RADAR_TRACE_MAGENTA:RADAR_TRACE_CYAN,BLIP_DISPLAY_BLIP_ONLY);
         CRadar::ChangeBlipScale(actor.blip,2);
         CRadar::ChangeBlipColour(actor.blip,id==0?RADAR_TRACE_MAGENTA:RADAR_TRACE_CYAN);
@@ -475,7 +480,7 @@ void ReplayShot(const vc::Message& m) {
     CParticle::AddParticle(PARTICLE_GUNSMOKE2,start,forward*.12f,nullptr,.015f);
     }
     if(!(shot.flags&4)) CBulletTraces::AddTrace(&start,&end,int(shot.weapon),shooter);
-    if(!(shot.flags&2) && shooter->IsPed()) DMAudio.PlayOneShot(static_cast<CPed*>(shooter)->m_audioEntityId,SOUND_WEAPON_SHOT_FIRED,0.f);
+    if(!(shot.flags&2)) {if(shooter->IsPed()) DMAudio.PlayOneShot(static_cast<CPed*>(shooter)->m_audioEntityId,SOUND_WEAPON_SHOT_FIRED,0.f);else if(shooter->IsVehicle()) DMAudio.PlayOneShot(static_cast<CVehicle*>(shooter)->m_audioEntityId,SOUND_WEAPON_SHOT_FIRED,0.f);}
     if(shot.flags&1) {
         CVector normal(shot.normal.x,shot.normal.y,shot.normal.z);
         if(shot.impactKind==2) {
@@ -501,6 +506,27 @@ void ReplayShot(const vc::Message& m) {
 void ApplyCombatEvent(const vc::Message& m) {
     auto& a=State();if(m.kind==vc::Kind::PickupGrant) {a.pickups.Event(m);return;}if(a.world.Event(m)) return;
     if(m.kind==vc::Kind::Shot) {ReplayShot(m);return;}
+    if(m.kind==vc::Kind::HeliReward) {
+        if(m.hit.targetEpoch!=a.snapshot.players[a.snapshot.self].epoch || m.hit.life!=a.life || !a.rewardedHelis.insert({m.heli.target,m.heli.generation}).second) return;
+        auto& info=CWorld::Players[CWorld::PlayerInFocus];info.m_nMoney+=250;CStats::PeopleKilledByPlayer+=2;CStats::PedsKilledOfThisType[PEDTYPE_COP]+=2;
+        info.m_pPed->m_pWanted->RegisterCrime_Immediately(CRIME_SHOOT_HELI,info.GetPos(),m.heli.target,false);++a.heliRewards;return;
+    }
+    if(m.kind==vc::Kind::HeliHit) {
+        const auto& hit=m.heli;auto* e=a.world.Pointer(hit.target);
+        if(!e || !e->IsVehicle() || !static_cast<CVehicle*>(e)->IsHeli() || a.world.Generation(hit.target)!=hit.generation) return;
+        if(a.world.Owns(e)) {static_cast<CHeli*>(e)->ApplyNetworkHit(hit.mode,hit.damage);++a.heliHits;}
+        if(hit.mode==0 && m.sender!=a.snapshot.self) for(unsigned i=0;i<16;++i) CParticle::AddParticle(PARTICLE_SPARK,CVector(hit.point.x,hit.point.y,hit.point.z),CVector(0,0,0));
+        return;
+    }
+    if(m.kind==vc::Kind::Arrest) {
+        const auto& arrest=m.arrest;auto* p=LocalPlayer();auto* entity=a.world.Pointer(arrest.cop);
+        if(!entity && arrest.life==a.life && a.arrestedLife!=a.life) {a.pendingArrest=m;a.arrestWaitUntil=vc::NowMs()+2000;return;}
+        if(!p || arrest.target!=a.snapshot.self || arrest.epoch!=a.snapshot.players[a.snapshot.self].epoch || arrest.life!=a.life || a.arrestedLife==a.life
+            || p->DyingOrDead() || !p->m_pWanted->GetWantedLevel() || !entity || !entity->IsPed()
+            || a.world.Generation(arrest.cop)!=arrest.generation || static_cast<CPed*>(entity)->m_nPedType!=PEDTYPE_COP) return;
+        auto* cop=static_cast<CCopPed*>(entity);if(cop->m_area!=p->m_area || (cop->GetPosition()-p->GetPosition()).MagnitudeSqr()>49) return;
+        a.world.CancelLocalEntry();NpcPlayerScope context(cop,p);cop->ApplyArrest(p);a.arrestedLife=a.life;++a.arrestsApplied;return;
+    }
     if(m.kind==vc::Kind::Crime) {
         const auto& c=m.crime;auto* p=LocalPlayer();
         if(!p || c.target!=a.snapshot.self || c.epoch!=a.snapshot.players[a.snapshot.self].epoch || c.life!=a.life || p->DyingOrDead()) return;
@@ -540,7 +566,7 @@ void Diagnostics(CPlayerPed* p) {
     auto& a=State(); auto now=vc::NowMs(); if(now-a.lastLog<(a.sandbox && now<a.testTraceUntil?30:250)) return; a.lastLog=now;
     auto s=Capture(p);unsigned heliCount=0;for(int i=0;i<CPools::GetVehiclePool()->GetSize();++i) if(auto* v=CPools::GetVehiclePool()->GetSlot(i);v && v->IsHeli()) ++heliCount;
     std::ofstream f("vc-coop-state.json",std::ios::trunc);
-    f<<"{\"tick\":"<<now<<",\"pid\":"<<GetCurrentProcessId()<<",\"commandSerial\":"<<a.lastCommand<<",\"commandResult\":\""<<a.commandResult<<"\",\"build\":\"reVC 0.2.7\",\"self\":"<<unsigned(a.snapshot.self)<<",\"online\":"<<Active()<<",\"ready\":"<<a.worldReady<<",\"sandbox\":"<<a.sandbox
+    f<<"{\"tick\":"<<now<<",\"pid\":"<<GetCurrentProcessId()<<",\"commandSerial\":"<<a.lastCommand<<",\"commandResult\":\""<<a.commandResult<<"\",\"build\":\"reVC 0.2.8\",\"self\":"<<unsigned(a.snapshot.self)<<",\"online\":"<<Active()<<",\"ready\":"<<a.worldReady<<",\"sandbox\":"<<a.sandbox
      <<",\"heliCount\":"<<heliCount<<",\"fpsLimit\":"<<RsGlobal.maxFPS<<",\"limiterEnabled\":"<<unsigned(FrontEndMenuManager.m_PrefsFrameLimiter)<<",\"validState\":"<<vc::ValidState(s)<<",\"frameStep\":"<<CTimer::GetTimeStep()<<",\"pedState\":"<<unsigned(s.pedState)<<",\"move\":"<<unsigned(s.move)<<",\"weapon\":"<<unsigned(s.weapon)<<",\"ammo\":"<<s.ammo<<",\"actions\":"<<unsigned(s.actions)<<",\"aimDirection\":["<<s.aimDirection.x<<","<<s.aimDirection.y<<","<<s.aimDirection.z<<"]"<<",\"position\":["<<s.position.x<<","<<s.position.y<<","<<s.position.z<<"],\"animations\":"<<unsigned(s.animationCount)<<",\"remotes\":[";
     bool comma=false;
     for(unsigned i=0;i<vc::kMaxPlayers;++i) if(a.actors[i].ped) {
@@ -556,7 +582,7 @@ void Diagnostics(CPlayerPed* p) {
     f<<",\"clock\":{\"ready\":"<<a.snapshot.clockReady<<",\"samples\":"<<a.snapshot.clockSamples<<",\"rtt\":"<<a.snapshot.clockRtt<<",\"offset\":"<<a.snapshot.clockOffset<<"},\"environment\":{\"hour\":"<<unsigned(env.hour)<<",\"minute\":"<<unsigned(env.minute)<<",\"second\":"<<unsigned(env.second)<<",\"old\":"<<unsigned(env.oldWeather)<<",\"new\":"<<unsigned(env.weather)<<",\"forced\":"<<env.forcedWeather<<",\"flags\":"<<unsigned(env.flags)<<",\"values\":[";
     for(unsigned i=0;i<env.values.size();++i) {if(i) f<<",";f<<env.values[i];}f<<"]}";
     f<<",\"probePoint\":["<<a.probePoint.x<<","<<a.probePoint.y<<","<<a.probePoint.z<<"],\"weaponReady\":"<<WeaponReady(p->GetWeapon()->m_eWeaponType)<<",\"weaponModel\":"<<(p->m_pWeaponModel!=nullptr)
-     <<",\"life\":"<<a.life<<",\"health\":"<<p->m_fHealth<<",\"armour\":"<<p->m_fArmour<<",\"inVehicle\":"<<p->bInVehicle<<",\"vehicle\":"<<a.world.Id(p->m_pMyVehicle)<<",\"shotsSent\":"<<a.shotsSent<<",\"aiShots\":"<<a.aiShots<<",\"aiAimChecks\":"<<a.aiAimChecks<<",\"crimeReports\":"<<a.crimeReports<<",\"crimesApplied\":"<<a.crimesApplied<<",\"money\":"<<CWorld::Players[CWorld::PlayerInFocus].m_nMoney<<",\"wanted\":"<<p->m_pWanted->GetWantedLevel()<<",\"shotsReplayed\":"<<a.shotsReplayed<<",\"hitsSent\":"<<a.hitsSent<<",\"hitsApplied\":"<<a.hitsApplied<<",\"explosionsSent\":"<<a.explosionsSent<<",\"explosionsReplayed\":"<<a.explosionsReplayed<<"}\n";
+     <<",\"wbState\":"<<int(CWorld::Players[CWorld::PlayerInFocus].m_WBState)<<",\"heliHits\":"<<a.heliHits<<",\"heliRewards\":"<<a.heliRewards<<",\"arrestsApplied\":"<<a.arrestsApplied<<",\"respawns\":"<<a.respawns<<",\"life\":"<<a.life<<",\"health\":"<<p->m_fHealth<<",\"armour\":"<<p->m_fArmour<<",\"inVehicle\":"<<p->bInVehicle<<",\"vehicle\":"<<a.world.Id(p->m_pMyVehicle)<<",\"shotsSent\":"<<a.shotsSent<<",\"aiShots\":"<<a.aiShots<<",\"aiAimChecks\":"<<a.aiAimChecks<<",\"crimeReports\":"<<a.crimeReports<<",\"crimesApplied\":"<<a.crimesApplied<<",\"money\":"<<CWorld::Players[CWorld::PlayerInFocus].m_nMoney<<",\"wanted\":"<<p->m_pWanted->GetWantedLevel()<<",\"shotsReplayed\":"<<a.shotsReplayed<<",\"hitsSent\":"<<a.hitsSent<<",\"hitsApplied\":"<<a.hitsApplied<<",\"explosionsSent\":"<<a.explosionsSent<<",\"explosionsReplayed\":"<<a.explosionsReplayed<<"}\n";
 }
 // Explicit opt-in development commands run through engine APIs, never memory writes.
 void TestCommands(CPlayerPed* p) {
@@ -630,6 +656,12 @@ void TestCommands(CPlayerPed* p) {
             if(CStreaming::HasModelLoaded(model)) CPickups::GenerateNewOne(CVector(x,y,z),model,uint8_t(type),quantity);
         }
     }
+    else if(command=="trackaim") {unsigned id,ms;if(f>>id>>ms) {a.testTrackEntity=id;a.testTrackUntil=vc::NowMs()+std::min(ms,30000u);}}
+    else if(command=="helishot") {unsigned id,mode,count;if(f>>id>>mode>>count && mode<=2 && count<=200) {auto* e=a.world.Pointer(id);if(e && e->IsVehicle() && static_cast<CVehicle*>(e)->IsHeli()) {auto* h=static_cast<CHeli*>(e);CVector target=mode==2?h->GetMatrix()*CVector(-.43f,1.49f,1.5f):h->GetPosition(),start=mode==1?target:p->GetPosition()+CVector(0,0,.5f);for(unsigned i=0;i<count;++i) TestHeliCollision(mode,start,target,nullptr,20,p);}}}
+    else if(command=="helifire") {unsigned id,target;if(f>>id>>target && target<vc::kMaxPlayers) {auto* e=a.world.Pointer(id);auto* victim=target==a.snapshot.self?p:a.actors[target].ped;if(e && e->IsVehicle() && static_cast<CVehicle*>(e)->IsHeli() && a.world.Owns(e) && victim) {auto start=e->GetPosition(),to=victim->GetPosition()+CVector(0,0,.4f);FireOneInstantHitRound(&start,&to,20,e);}}}
+    else if(command=="die") p->InflictDamage(nullptr,WEAPONTYPE_DROWNING,1000,PEDPIECE_TORSO,0);
+    else if(command=="fall") p->SetFall(4000,ANIM_STD_HIGHIMPACT_FRONT,false);
+    else if(command=="arrest") {unsigned id,target;if(f>>id>>target && target<vc::kMaxPlayers) {auto* e=a.world.Pointer(id);auto* suspect=target==a.snapshot.self?p:a.actors[target].ped;if(e && e->IsPed() && static_cast<CPed*>(e)->m_nPedType==PEDTYPE_COP && a.world.Owns(e)) static_cast<CCopPed*>(e)->SetArrestPlayer(suspect);}}
     else if(command=="vitals") {float health,armour;if(f>>health>>armour && health>0 && health<=100 && armour>=0 && armour<=100) {p->m_fHealth=health;p->m_fArmour=armour;}}
     else if(command=="wanted") {unsigned level;if(f>>level && level<=6) p->SetWantedLevel(level);}
     else if(command=="weapon") {int type;if(f>>type && type>=0 && type<WEAPONTYPE_TOTALWEAPONS) {
@@ -716,7 +748,10 @@ void BeforeProcess() {
         UpdateWorld();
         for(unsigned i=0;i<vc::kMaxPlayers;++i) {ApplyRemote(i);if(State().actors[i].ped) State().world.Attach(State().actors[i].ped,State().snapshot.players[i].state);}
         // Events enter the owner simulation before NPC perception/control this tick.
-        for(auto& event:State().network.TakeEvents()) if(event.message.kind==vc::Kind::PickupGrant || vc::NowMs()-event.received<1500) ApplyCombatEvent(event.message);
+        for(auto& event:State().network.TakeEvents()) if(event.message.kind==vc::Kind::PickupGrant || event.message.kind==vc::Kind::HeliReward || event.message.kind==vc::Kind::HeliHit || event.message.kind==vc::Kind::Arrest || vc::NowMs()-event.received<1500) ApplyCombatEvent(event.message);
+        auto& arrests=State();
+        if(arrests.pendingArrest && (vc::NowMs()>arrests.arrestWaitUntil || arrests.pendingArrest->arrest.life!=arrests.life)) arrests.pendingArrest.reset();
+        if(arrests.pendingArrest && arrests.world.Pointer(arrests.pendingArrest->arrest.cop)) {auto m=*arrests.pendingArrest;arrests.pendingArrest.reset();ApplyCombatEvent(m);}
         State().pickups.Tick(State().snapshot,State().network);
         ProcessPlayerIntent();
     }
@@ -727,6 +762,16 @@ void BeforeProcess() {
     }
     if(a.sandbox && vc::NowMs()<a.testAimUntil) CPad::GetPad(0)->NewState.RightShoulder1=255;
     if(a.sandbox && vc::NowMs()<a.testFireUntil) {auto* pad=CPad::GetPad(0);pad->NewState.Circle=255;pad->NewState.RightShoulder1=255;}
+    // Sandbox input fixture: steer the stock camera's reticle, then let the
+    // normal pad/weapon/hitscan path decide whether a shot hits anything.
+    if(a.sandbox && vc::NowMs()<a.testTrackUntil) if(auto* target=a.world.Pointer(a.testTrackEntity)) {
+        CVector from,to;TheCamera.Find3rdPersonCamTargetVector(15.f,LocalPlayer()->GetPosition()+CVector(0,0,.65f),from,to);
+        auto desired=target->GetPosition()-from,current=to-from;
+        float yaw=std::atan2(desired.y,desired.x)-std::atan2(current.y,current.x);
+        while(yaw>PI)yaw-=2*PI;while(yaw<-PI)yaw+=2*PI;
+        float pitch=std::atan2(desired.z,std::hypot(desired.x,desired.y))-std::atan2(current.z,std::hypot(current.x,current.y));
+        auto& camera=TheCamera.Cams[TheCamera.ActiveCam];camera.Beta+=std::clamp(yaw*.5f,-.2f,.2f);camera.Alpha+=std::clamp(pitch*.5f,-.1f,.1f);
+    }
     if(a.sandbox && vc::NowMs()<a.testJumpUntil) CPad::GetPad(0)->NewState.Square=255;
     if(a.sandbox && vc::NowMs()<a.testDriveUntil) {
         auto* pad=CPad::GetPad(0);pad->NewState.Cross=a.testGas>0?a.testGas:0;pad->NewState.Square=a.testGas<0?-a.testGas:0;pad->NewState.LeftStickX=a.testSteer;
@@ -744,8 +789,6 @@ void AfterProcess() {
     if(a.sandbox && !a.worldReady) PrepareSandbox(p);
     if(!a.sandbox) a.worldReady=!CCutsceneMgr::IsCutsceneProcessing();
     if(!a.worldReady) return;
-    if(a.previousHealth<=0 && p->m_fHealth>0) ++a.life;
-    a.previousHealth=p->m_fHealth;
     TestCommands(p);
     UpdateWorld();
     static uint64_t invalidStateLog=0;
@@ -852,6 +895,58 @@ bool SendCrime(CWanted* wanted,unsigned type,const CVector& position,uint32_t id
     }
     return false;
 }
+}
+bool TestHeliCollision(unsigned mode,const CVector& from,const CVector& to,CVector* impact,unsigned damage,CEntity* source) {
+    auto& a=State();if(!Active() || !source || (source!=LocalPlayer() && !a.world.Owns(source))) return false;
+    bool hit=false;auto* pool=CPools::GetVehiclePool();
+    for(int i=0;i<pool->GetSize();++i) {
+        auto* v=pool->GetSlot(i);if(!v || !v->IsHeli() || v->GetModelIndex()!=MI_CHOPPER || !a.world.Id(v)) continue;
+        auto* h=static_cast<CHeli*>(v);if(h->m_heliStatus==3 || (mode==1?h->bExplosionProof:h->bBulletProof)) continue;
+        CVector target=mode==2?h->GetMatrix()*CVector(-.43f,1.49f,1.5f):h->GetPosition();
+        float distance=mode==1?(target-from).Magnitude():CCollision::DistToLine(&from,&to,&target);
+        if(distance>=(mode==1?8.f:mode==2?.8f:5.f)) continue;
+        CVector point=target;
+        if(mode==0) {CVector line=to-from;float length=line.Magnitude();if(length<.001f)continue;point=from+line*std::max(1.f,(target-from).Magnitude()-5.f)/length;}
+        if(mode!=1 && !CWorld::GetIsLineOfSightClear(from,point,true,false,false,true,false,false,false)) continue;
+        vc::Message m;m.kind=vc::Kind::HeliHit;auto& wire=m.heli;wire.target=a.world.Id(h);wire.generation=a.world.Generation(wire.target);
+        wire.source=source==LocalPlayer()?0:a.world.Id(source);wire.sourceGeneration=a.world.Generation(wire.source);wire.sourceLife=a.life;wire.mode=uint8_t(mode);wire.damage=uint16_t(std::clamp(damage,1u,20u));wire.point={point.x,point.y,point.z};
+        if(a.network.SendEvent(m)) {hit=true;if(impact)*impact=point;}
+    }
+    return hit;
+}
+void HeliDestroyed(CHeli* h) {
+    auto& a=State();if(!Active() || !a.world.Owns(h)) return;
+    vc::Message m;m.kind=vc::Kind::HeliDown;m.heli.target=a.world.Id(h);m.heli.generation=a.world.Generation(m.heli.target);a.network.SendEvent(m);
+}
+bool RouteArrest(CCopPed* cop,CPed* suspect) {
+    auto& a=State();if(!Active() || !cop || !suspect || suspect==LocalPlayer()) return false;
+    unsigned id=PlayerId(suspect);if(id>=vc::kMaxPlayers || !a.world.Owns(cop)) return true;
+    auto& actor=a.actors[id];const auto& remote=a.snapshot.players[id];auto now=vc::NowMs();
+    if(now-actor.arrestSent>=500 && remote.state.health>0 && remote.state.wanted) {
+        vc::Message m;m.kind=vc::Kind::Arrest;m.arrest={uint8_t(id),remote.epoch,remote.state.life,a.world.Id(cop),a.world.Generation(a.world.Id(cop))};
+        if(a.network.SendEvent(m)) {actor.arrestSent=now;cop->ApplyArrest(suspect);}
+    }
+    return true;
+}
+bool SelectRespawnPoint(CVector& position,float heading) {
+    if(!Active()) return true;
+    auto* p=LocalPlayer();if(!p) return false;
+    CStreaming::LoadSceneCollision(position);
+    CVector safe;const float phase=DEGTORAD(heading)+float(State().snapshot.self)*2.f*PI/float(vc::kMaxPlayers);
+    auto area=CGame::currArea;CGame::currArea=AREA_MAIN_MAP;
+    const bool found=SpawnLocation(p,position+CVector(0,0,1),phase,safe);CGame::currArea=area;
+    if(!found) return false;
+    position=safe-CVector(0,0,1);return true;
+}
+void PlayerRespawned(CPlayerPed* p) {
+    auto& a=State();if(!Active() || p!=LocalPlayer()) return;
+    a.world.CancelLocalEntry();
+    CCopPed* cops[10];std::copy(std::begin(p->m_pWanted->m_pCops),std::end(p->m_pWanted->m_pCops),cops);
+    for(auto* cop:cops) if(cop && IsPedPointerValid(cop) && cop->m_nPedType==PEDTYPE_COP) {NpcPlayerScope context(cop,p);cop->ClearPursuit();}
+    auto* vehicle=p->m_pMyVehicle;if(vehicle && IsVehiclePointerValid(vehicle)) {if(vehicle->pDriver==p) vehicle->RemoveDriver();else vehicle->RemovePassenger(p);}
+    p->m_area=AREA_MAIN_MAP;
+    if(++a.life==0) ++a.life;++a.respawns;
+    Log("player respawn life="+std::to_string(a.life));
 }
 bool RemoteWanted(CWanted* w) {for(auto& actor:State().actors) if(actor.ped && actor.ped->m_pWanted==w) return true;return false;}
 uint32_t CrimeIdentity(CEntity* e) {
@@ -1013,7 +1108,7 @@ bool VehicleOccupants(CEntity* a,CEntity* b) {
 void CollisionContact(CPhysical* a,CPhysical* b,const CVector& move,const CVector& turn) {if(Active()) State().world.Contact(a,b,move,turn);}
 void WorldReset() {
     auto& a=State(); if(!a.initialised) return;
-    a.pickups.Clear();a.world.Clear();
+    a.rewardedHelis.clear();a.pendingArrest.reset();a.pickups.Clear();a.world.Clear();
     for(auto& actor:a.actors) ClearActor(actor);
     a.testPeds.clear();a.aiFocus=nullptr;a.aiWitness=nullptr;
     a.worldFrame=UINT32_MAX;

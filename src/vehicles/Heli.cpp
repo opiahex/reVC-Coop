@@ -1,5 +1,6 @@
 #include "common.h"
 #include "coop/Coop.h"
+#include "coop/common/Helicopter.h"
 #include "Pools.h"
 #include "main.h"
 
@@ -461,12 +462,7 @@ CHeli::ProcessControl(void)
 		m_fSearchLightY = m_aSearchLightHistoryY[m_nHeliId + 2] * f2 + m_aSearchLightHistoryY[m_nHeliId + 2 - 1] * f1;
 
 		float searchLightDist = (CVector2D(m_fSearchLightX, m_fSearchLightY) - GetPosition()).Magnitude();
-		if (searchLightDist > 60.0f)
-			m_fSearchLightIntensity = 0.0f;
-		else if (searchLightDist < 40.0f)
-			m_fSearchLightIntensity = 1.0f;
-		else
-			m_fSearchLightIntensity = 1.0f - (40.0f - searchLightDist) / (60.0f-40.0f);
+		m_fSearchLightIntensity = vc::HeliSearchlight(searchLightDist);
 
 		if (m_fSearchLightIntensity < 0.9f || sq(FindPlayerCoors().x - m_fSearchLightX) + sq(FindPlayerCoors().y - m_fSearchLightY) > sq(7.0f))
 			m_nShootTimer = CTimer::GetTimeInMilliseconds();
@@ -525,7 +521,7 @@ CHeli::ProcessControl(void)
 					shotTarget += 3.0f * direction;
 					CVector shotSource = GetPosition();
 					shotSource += 3.0f * direction;
-					FireOneInstantHitRound(&shotSource, &shotTarget, 20);
+					FireOneInstantHitRound(&shotSource, &shotTarget, 20, this);
 					DMAudio.PlayOneShot(m_audioEntityId, SOUND_WEAPON_SHOT_FIRED, 0.0f);
 					m_nLastShotTime = CTimer::GetTimeInMilliseconds();
 				}
@@ -631,7 +627,16 @@ GetHeliAtomicObjectCB(RwObject *object, void *data)
 	return object;
 }
 
-CObject*
+static RwObject* FindHeliAtomic(RwObject* object,void* data) {if(RwObjectGetType(object)==rpATOMIC) *static_cast<RpAtomic**>(data)=reinterpret_cast<RpAtomic*>(object);return object;}
+uint8 CHeli::ComponentMask() const {
+    uint8 mask=0;
+    for(int i=1;i<NUM_HELI_NODES;++i) if(m_aHeliNodes[i]) {RpAtomic* atomic=nullptr;RwFrameForAllObjects(m_aHeliNodes[i],FindHeliAtomic,&atomic);if(atomic && RpAtomicGetFlags(atomic)&rpATOMICRENDER) mask|=1u<<i;}
+    return mask;
+}
+void CHeli::SetComponentMask(uint8 mask) {
+    for(int i=1;i<NUM_HELI_NODES;++i) if(m_aHeliNodes[i]) {RpAtomic* atomic=nullptr;RwFrameForAllObjects(m_aHeliNodes[i],FindHeliAtomic,&atomic);if(atomic) RpAtomicSetFlags(atomic,(mask&(1u<<i))?rpATOMICRENDER:0);}
+}
+CObject *
 CHeli::SpawnFlyingComponent(int32 component)
 {
 	RpAtomic *atomic;
@@ -898,13 +903,14 @@ CHeli::UpdateHelis(void)
 					colors[nFrameGen&7], rotSpeed, 0, f, 0);
 			}
 
-			CExplosion::AddExplosion(nil, nil, EXPLOSION_HELI, pos, 0);
+			CExplosion::AddExplosion(vccoop::Active()?pHelis[i]:nil, nil, EXPLOSION_HELI, pos, 0);
 
 			pHelis[i]->SpawnFlyingComponent(HELI_SKID_LEFT);
 			pHelis[i]->SpawnFlyingComponent(HELI_SKID_RIGHT);
 			pHelis[i]->SpawnFlyingComponent(HELI_TOPROTOR);
 
-			CDarkel::RegisterCarBlownUpByPlayer(pHelis[i]);
+			if(!vccoop::Active()) CDarkel::RegisterCarBlownUpByPlayer(pHelis[i]);
+            if(vccoop::Active()) vccoop::HeliDestroyed(pHelis[i]);
 			CWorld::Remove(pHelis[i]);
 			delete pHelis[i];
 			pHelis[i] = nil;
@@ -913,17 +919,19 @@ CHeli::UpdateHelis(void)
 			if(i == HELI_CATALINA)
 				CatalinaHasBeenShotDown = true;
 
+            if(!vccoop::Active()) {
 			CStats::PeopleKilledByPlayer += 2;
 			CStats::PedsKilledOfThisType[PEDTYPE_COP] += 2;
 			CWorld::Players[CWorld::PlayerInFocus].m_nMoney += 250;
 			pos = CWorld::Players[CWorld::PlayerInFocus].m_pPed->GetPosition();
 			CWorld::Players[CWorld::PlayerInFocus].m_pPed->m_pWanted->RegisterCrime_Immediately(CRIME_SHOOT_HELI,
 				pos, i + 19843, false);
+            }
 
 			TestForNewRandomHelisTimer = CTimer::GetTimeInMilliseconds() + 50000;
 		}else if(pHelis[i] && pHelis[i]->m_heliStatus == HELI_STATUS_SHOT_DOWN && CTimer::GetTimeInMilliseconds()+7000 > pHelis[i]->m_nExplosionTimer){
 			// First part of explosion
-			if(CTimer::GetPreviousTimeInMilliseconds()+7000 < pHelis[i]->m_nExplosionTimer){
+			if(CTimer::GetPreviousTimeInMilliseconds()+7000 <= pHelis[i]->m_nExplosionTimer){
 				pHelis[i]->SpawnFlyingComponent(HELI_BACKROTOR);
 				pHelis[i]->SpawnFlyingComponent(HELI_TAIL);
 				pHelis[i]->m_fAngularSpeed *= -2.5f;
@@ -932,7 +940,7 @@ CHeli::UpdateHelis(void)
 				TheCamera.CamShake(0.4f, pHelis[i]->GetPosition().x, pHelis[i]->GetPosition().y, pHelis[i]->GetPosition().z);
 
 				CVector pos = pHelis[i]->GetPosition() - 2.5f*pHelis[i]->GetForward();
-				CExplosion::AddExplosion(nil, nil, EXPLOSION_HELI2, pos, 0);
+				CExplosion::AddExplosion(vccoop::Active()?pHelis[i]:nil, nil, EXPLOSION_HELI2, pos, 0);
 			}else
 				pHelis[i]->m_fAngularSpeed *= 1.03f;
 		}
@@ -941,6 +949,7 @@ CHeli::UpdateHelis(void)
 	// Find police helis to remove
 	for(i = 0; i < 2; i++)
 		if(pHelis[i] && pHelis[i]->m_heliStatus != HELI_STATUS_FLY_AWAY){
+            if(vccoop::Active() && pHelis[i]->m_heliStatus==HELI_STATUS_SHOT_DOWN) continue;
 			if(numHelisRequired > 0)
 				numHelisRequired--;
 			else
@@ -968,8 +977,9 @@ CHeli::SpecialHeliPreRender(void)
 }
 
 bool
-CHeli::TestRocketCollision(CVector *rocketPos)
+CHeli::TestRocketCollision(CVector *rocketPos,CEntity* source)
 {
+    if(vccoop::Active()) return vccoop::TestHeliCollision(1,*rocketPos,*rocketPos,nullptr,1,source);
 	int i;
 	bool hit = false;
 
@@ -985,8 +995,9 @@ CHeli::TestRocketCollision(CVector *rocketPos)
 }
 
 bool
-CHeli::TestBulletCollision(CVector *line0, CVector *line1, CVector *bulletPos, int32 damage)
+CHeli::TestBulletCollision(CVector *line0, CVector *line1, CVector *bulletPos, int32 damage,CEntity* source)
 {
+    if(vccoop::Active()) return vccoop::TestHeliCollision(0,*line0,*line1,bulletPos,damage,source);
 	int i;
 	bool hit = false;
 
@@ -1013,8 +1024,9 @@ CHeli::TestBulletCollision(CVector *line0, CVector *line1, CVector *bulletPos, i
 }
 
 bool
-CHeli::TestSniperCollision(CVector *line0, CVector *line1)
+CHeli::TestSniperCollision(CVector *line0, CVector *line1,CEntity* source)
 {
+    if(vccoop::Active()) return vccoop::TestHeliCollision(2,*line0,*line1,nullptr,1,source);
 	int i;
 	bool hit = false;
 
@@ -1034,6 +1046,13 @@ CHeli::TestSniperCollision(CVector *line0, CVector *line1)
 	return hit;
 }
 
+void CHeli::ApplyNetworkHit(unsigned mode,unsigned damage) {
+    if(m_heliStatus==HELI_STATUS_SHOT_DOWN || (mode==1?bExplosionProof:bBulletProof)) return;
+    if(mode==0) {m_nBulletDamage+=damage;if(m_nBulletDamage<=700) return;}
+    m_fAngularSpeed=CGeneral::GetRandomTrueFalse()?0.05f:-0.05f;
+    m_heliStatus=HELI_STATUS_SHOT_DOWN;m_nExplosionTimer=CTimer::GetTimeInMilliseconds()+(mode==2?9999999:10000);
+    if(mode==2) m_numSwat=0;
+}
 void CHeli::StartCatalinaFlyBy(void)
 {
 	CatalinaHeliOn = true;

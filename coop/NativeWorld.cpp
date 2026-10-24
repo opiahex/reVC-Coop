@@ -209,7 +209,7 @@ struct NativeWorld::Impl {
             v.transform=SampleTransform(car); v.turn=Wire(car->m_vecTurnSpeed*50.f);
             v.health=std::max(car->m_fHealth,0.f); v.steer=car->m_fSteerAngle; v.gas=car->m_fGasPedal; v.brake=std::max(car->m_fBrakePedal,0.f);
             v.type=uint8_t(car->m_vehType); v.primary=car->m_currentColour1; v.secondary=car->m_currentColour2;
-            if(car->IsHeli()) {auto* h=static_cast<CHeli*>(car);v.rotor=h->m_fRotorRotation;v.searchX=h->m_fSearchLightX;v.searchY=h->m_fSearchLightY;v.searchIntensity=h->m_fSearchLightIntensity;v.heliStatus=uint8_t(h->m_heliStatus);}
+            if(car->IsHeli()) {auto* h=static_cast<CHeli*>(car);v.rotor=h->m_fRotorRotation;v.searchX=h->m_fSearchLightX;v.searchY=h->m_fSearchLightY;v.searchIntensity=h->m_fSearchLightIntensity;v.heliStatus=uint8_t(h->m_heliStatus);v.heliComponents=h->ComponentMask();v.heliDamage=uint16_t(std::min(h->m_nBulletDamage,1000u));}
             v.gear=uint8_t(car->m_nCurrentGear); v.passengers=uint8_t(std::min<unsigned>(car->m_nNumMaxPassengers,8));
             v.flags=(car->bEngineOn?1:0)|(car->bLightsOn?2:0)|(car->bRenderScorched?4:0)|(car->GetStatus()==STATUS_WRECKED?8:0);
             const float step=std::max(CTimer::GetTimeStepInSeconds(),.001f);
@@ -233,7 +233,7 @@ struct NativeWorld::Impl {
         bool valid=vc::ValidEntity(e);
         if(!valid && vc::NowMs()-r.invalidAt>10000) {
             r.invalidAt=vc::NowMs();std::ostringstream reason;auto& v=e.vehicle;
-            reason<<"invalid native state id="<<e.id<<" kind="<<int(e.kind)<<" model="<<e.model<<" area="<<int(e.area)<<" health="<<v.health<<" steering="<<v.steer<<" gas="<<v.gas<<" brake="<<v.brake<<" type="<<int(v.type)<<" gear="<<int(v.gear)<<" panels="<<v.panels<<" lights="<<v.lights;
+            reason<<"invalid native state id="<<e.id<<" kind="<<int(e.kind)<<" model="<<e.model<<" area="<<int(e.area)<<" health="<<v.health<<" steering="<<v.steer<<" gas="<<v.gas<<" brake="<<v.brake<<" type="<<int(v.type)<<" gear="<<int(v.gear)<<" panels="<<v.panels<<" lights="<<v.lights<<" transformValid="<<vc::ValidTransform(v.transform)<<" rotor="<<v.rotor<<" searchIntensity="<<v.searchIntensity<<" heliDamage="<<v.heliDamage<<" heliComponents="<<unsigned(v.heliComponents);
             for(unsigned i=0;i<6;++i) reason<<" door"<<i<<"="<<int(v.doors[i])<<"@"<<v.doorAngles[i];
             for(unsigned i=0;i<4;++i) reason<<" wheel"<<i<<"="<<v.wheelAngle[i]<<"/"<<v.wheelOmega[i]<<"/"<<v.wheelPosition[i]<<"/"<<v.suspension[i];
             if(outer->log) outer->log(reason.str());
@@ -287,7 +287,7 @@ struct NativeWorld::Impl {
                 for(unsigned i=0;i<2;++i) {b->m_wheelStatus[i]=v.wheels[i];b->m_aWheelRotation[i]=v.wheelAngle[i];b->m_aWheelSpeed[i]=v.wheelOmega[i]*CTimer::GetTimeStepInSeconds();b->m_aWheelPosition[i]=v.wheelPosition[i];}
                 for(unsigned i=0;i<4;++i) b->m_aSuspensionSpringRatio[i]=v.suspension[i];
             }
-            if(car->IsHeli()) {auto* h=static_cast<CHeli*>(car);h->m_fRotorRotation=v.rotor;h->m_fSearchLightX=v.searchX;h->m_fSearchLightY=v.searchY;h->m_fSearchLightIntensity=v.searchIntensity;h->m_heliStatus=int8_t(v.heliStatus);}
+            if(car->IsHeli()) {auto* h=static_cast<CHeli*>(car);h->m_fRotorRotation=v.rotor;h->m_fSearchLightX=v.searchX;h->m_fSearchLightY=v.searchY;h->m_fSearchLightIntensity=v.searchIntensity;h->m_heliStatus=int8_t(v.heliStatus);h->m_nBulletDamage=v.heliDamage;h->SetComponentMask(v.heliComponents);}
             car->m_fHealth=v.health;
         } else {
             auto* o=static_cast<CObject*>(p);Transform(o,e.object.transform);
@@ -490,8 +490,14 @@ void NativeWorld::Attach(CPed* p,const vc::PlayerState& s) {
     if(p->GetPedState()==PED_DRIVING) p->SetPedPositionInCar();
     p->GetMatrix().UpdateRW();p->UpdateRwFrame();
 }
+void NativeWorld::CancelLocalEntry() {
+    auto& a=*impl_;a.pendingDriver=0;a.lastSeatVehicle=0;a.lastSeatUntil=0;
+    auto* p=LocalPlayer();if(!p) return;
+    if(p->EnteringCar()) p->QuitEnteringCar();p->ClearObjective();
+}
 bool NativeWorld::CanEnter(CPed* p,CVehicle* v) {
     auto& a=*impl_;if(p!=LocalPlayer() || !a.network) return true;
+    if(p->DyingOrDead() || p->GetPedState()==PED_ARRESTED) return false;
     uint32_t id=Id(v);if(!id) return false;
     if(p->m_objective==OBJECTIVE_ENTER_CAR_AS_PASSENGER) {
         unsigned seat=SeatForDoor(p->m_vehDoor);
@@ -536,7 +542,7 @@ bool NativeWorld::Event(const vc::Message& m) {
     auto& a=*impl_;
     if(m.kind==vc::Kind::SeatGrant) {
         if(m.id==255 || m.host!=a.net.self || Generation(m.entity.id)!=m.entity.generation) return true;
-        auto* p=LocalPlayer();auto* e=Pointer(m.entity.id);if(!p || !e || !e->IsVehicle() || p->bInVehicle) return true;
+        auto* p=LocalPlayer();auto* e=Pointer(m.entity.id);if(!p || !e || !e->IsVehicle() || p->bInVehicle || p->DyingOrDead() || p->GetPedState()==PED_ARRESTED) return true;
         auto* v=static_cast<CVehicle*>(e);if(m.id<1 || m.id>8 || v->pPassengers[m.id-1]) return true;
         a.lastSeatVehicle=m.entity.id;a.lastSeatIndex=m.id;a.lastSeatUntil=vc::NowMs()+8000;
         unsigned door=v->IsBike()?(DotProduct(p->GetPosition()-v->GetPosition(),v->GetRight())>=0?CAR_DOOR_RR:CAR_DOOR_LR):DoorForSeat(m.id);
@@ -632,6 +638,7 @@ void NativeWorld::Diagnostics(std::ostream& out) const {
             auto* v=static_cast<CVehicle*>(r.pointer);auto velocity=v->m_vecMoveSpeed*50.f;
             auto* frame=v->GetClump()?RpClumpGetFrame(v->GetClump()):nullptr;auto rendered=frame?RwFrameGetLTM(frame)->pos:pos;auto forward=v->GetForward();auto received=vc::EntityPosition(r.state);
             out<<",\"renderPosition\":["<<rendered.x<<","<<rendered.y<<","<<rendered.z<<"],\"velocity\":["<<velocity.x<<","<<velocity.y<<","<<velocity.z<<"],\"forward\":["<<forward.x<<","<<forward.y<<","<<forward.z<<"],\"wirePosition\":["<<received.x<<","<<received.y<<","<<received.z<<"],\"sequence\":"<<a.net.entities.at(id).sequence;
+            if(v->IsHeli()) {auto* h=static_cast<CHeli*>(v);out<<",\"heliState\":"<<int(h->m_heliStatus)<<",\"heliDamage\":"<<h->m_nBulletDamage<<",\"heliComponents\":"<<unsigned(h->ComponentMask());}
             LightDiagnostics(v,out);
             out<<",\"health\":"<<v->m_fHealth<<",\"driver\":"<<(v->pDriver!=nullptr)<<",\"passengers\":"<<int(v->m_nNumPassengers)<<",\"status\":"<<int(v->GetStatus());if(v->IsCar()) {auto* c=static_cast<CAutomobile*>(v);out<<",\"wheel\":"<<c->m_aWheelRotation[0]<<",\"door\":"<<int(c->Damage.m_doorStatus[0])<<",\"panels\":"<<c->Damage.m_panelStatus;out<<",\"steer\":"<<v->m_fSteerAngle<<",\"gas\":"<<v->m_fGasPedal<<",\"lights\":"<<c->Damage.m_lightStatus;}}
         if(r.state.kind==vc::EntityKind::Ped) {

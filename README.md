@@ -1,7 +1,7 @@
 # reVC-Coop
 
-![Version](https://img.shields.io/badge/version-0.2.7-ff81b7)
-[![Checks](https://img.shields.io/badge/checks-390%20passed-65ded2)](MIGRATION.md)
+![Version](https://img.shields.io/badge/version-0.2.8-ff81b7)
+[![Checks](https://img.shields.io/badge/checks-491%20passed-65ded2)](MIGRATION.md)
 ![GTA Vice City](https://img.shields.io/badge/GTA-Vice%20City-ff81b7)
 [![Licences](https://img.shields.io/badge/license-notices-65ded2)](#основа-и-сторонний-код)
 
@@ -11,7 +11,7 @@
 
 ## Игроки
 
-Бег, прыжки, смена оружия, стрельба и эффекты выстрелов. Над напарником видны ник, здоровье, броня, иконка оружия и звёзды его розыска. У каждого игрока свой розыск; NPC реагируют на прицеливание, выстрелы и попадания обоих игроков.
+Бег, прыжки, смена оружия, стрельба и эффекты выстрелов. Над напарником видны ник, здоровье, броня, иконка оружия и звёзды его розыска. У каждого игрока свой розыск; NPC реагируют на прицеливание, выстрелы и попадания обоих игроков. Смерть и арест одного игрока не сбрасывают мир напарника.
 
 ![Напарник в общем мире — вид от хоста](assets/players.png)
 

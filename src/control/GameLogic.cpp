@@ -1,4 +1,5 @@
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "GameLogic.h"
 #include "Clock.h"
@@ -85,6 +86,7 @@ void
 CGameLogic::SortOutStreamingAndMemory(const CVector &pos)
 {
 	CTimer::Stop();
+    if(vccoop::Active()) {CStreaming::LoadSceneCollision(pos);CStreaming::LoadScene(pos);CTimer::Update();return;}
 	CStreaming::FlushRequestList();
 	CStreaming::DeleteRwObjectsAfterDeath(pos);
 	CStreaming::RemoveUnusedModelsInLoadedList();
@@ -142,6 +144,10 @@ CGameLogic::Update()
 #else
 		if (CTimer::GetTimeInMilliseconds() - pPlayerInfo.m_nWBTime >= 0x1000) {
 #endif
+            if(vccoop::Active()) {
+                CRestart::FindClosestHospitalRestartPoint(pPlayerInfo.GetPos(), &vecRestartPos, &fRestartFloat);
+                if(!vccoop::SelectRespawnPoint(vecRestartPos,fRestartFloat)) return;
+            }
 			pPlayerInfo.m_WBState = WBSTATE_PLAYING;
 			if (pPlayerInfo.m_bGetOutOfHospitalFree) {
 				pPlayerInfo.m_bGetOutOfHospitalFree = false;
@@ -161,19 +167,19 @@ CGameLogic::Update()
 						pVehicle->RemovePassenger(pPlayerInfo.m_pPed);
 				}
 			}
-			CEventList::Initialise();
+			if(!vccoop::Active()) CEventList::Initialise();
 #ifdef SCREEN_DROPLETS
 			ScreenDroplets::Initialise();
 #endif
 			CMessages::ClearMessages();
 			CCarCtrl::ClearInterestingVehicleList();
-			CWorld::ClearExcitingStuffFromArea(pPlayerInfo.GetPos(), 4000.0f, true);
-			CRestart::FindClosestHospitalRestartPoint(pPlayerInfo.GetPos(), &vecRestartPos, &fRestartFloat);
+			if(!vccoop::Active()) CWorld::ClearExcitingStuffFromArea(pPlayerInfo.GetPos(), 4000.0f, true);
+			if(!vccoop::Active()) CRestart::FindClosestHospitalRestartPoint(pPlayerInfo.GetPos(), &vecRestartPos, &fRestartFloat);
 			CRestart::OverrideHospitalLevel = LEVEL_GENERIC;
 			CRestart::OverridePoliceStationLevel = LEVEL_GENERIC;
-			PassTime(720);
+			if(!vccoop::Active()) PassTime(720);
 			RestorePlayerStuffDuringResurrection(pPlayerInfo.m_pPed, vecRestartPos, fRestartFloat);
-			AfterDeathArrestSetUpShortCutTaxi();
+			if(!vccoop::Active()) AfterDeathArrestSetUpShortCutTaxi();
 			SortOutStreamingAndMemory(pPlayerInfo.GetPos());
 			TheCamera.m_fCamShakeForce = 0.0f;
 			TheCamera.SetMotionBlur(0, 0, 0, 0, MOTION_BLUR_NONE);
@@ -227,6 +233,10 @@ CGameLogic::Update()
 #ifdef FIX_BUGS
 			pPlayerInfo.m_nBustedAudioStatus = BUSTEDAUDIO_NONE;
 #endif
+            if(vccoop::Active()) {
+                CRestart::FindClosestPoliceRestartPoint(pPlayerInfo.GetPos(), &vecRestartPos, &fRestartFloat);
+                if(!vccoop::SelectRespawnPoint(vecRestartPos,fRestartFloat)) return;
+            }
 			pPlayerInfo.m_WBState = WBSTATE_PLAYING;
 			int takeMoney;
 
@@ -270,19 +280,19 @@ CGameLogic::Update()
 						pVehicle->RemovePassenger(pPlayerInfo.m_pPed);
 				}
 			}
-			CEventList::Initialise();
+			if(!vccoop::Active()) CEventList::Initialise();
 #ifdef SCREEN_DROPLETS
 			ScreenDroplets::Initialise();
 #endif
 			CMessages::ClearMessages();
 			CCarCtrl::ClearInterestingVehicleList();
-			CWorld::ClearExcitingStuffFromArea(pPlayerInfo.GetPos(), 4000.0f, true);
-			CRestart::FindClosestPoliceRestartPoint(pPlayerInfo.GetPos(), &vecRestartPos, &fRestartFloat);
+			if(!vccoop::Active()) CWorld::ClearExcitingStuffFromArea(pPlayerInfo.GetPos(), 4000.0f, true);
+			if(!vccoop::Active()) CRestart::FindClosestPoliceRestartPoint(pPlayerInfo.GetPos(), &vecRestartPos, &fRestartFloat);
 			CRestart::OverrideHospitalLevel = LEVEL_GENERIC;
 			CRestart::OverridePoliceStationLevel = LEVEL_GENERIC;
-			PassTime(720);
+			if(!vccoop::Active()) PassTime(720);
 			RestorePlayerStuffDuringResurrection(pPlayerInfo.m_pPed, vecRestartPos, fRestartFloat);
-			AfterDeathArrestSetUpShortCutTaxi();
+			if(!vccoop::Active()) AfterDeathArrestSetUpShortCutTaxi();
 			pPlayerInfo.m_pPed->ClearWeapons();
 			SortOutStreamingAndMemory(pPlayerInfo.GetPos());
 			TheCamera.m_fCamShakeForce = 0.0f;
@@ -325,13 +335,13 @@ CGameLogic::Update()
 						pVehicle->RemovePassenger(pPlayerInfo.m_pPed);
 				}
 			}
-			CEventList::Initialise();
+			if(!vccoop::Active()) CEventList::Initialise();
 #ifdef SCREEN_DROPLETS
 			ScreenDroplets::Initialise();
 #endif
 			CMessages::ClearMessages();
 			CCarCtrl::ClearInterestingVehicleList();
-			CWorld::ClearExcitingStuffFromArea(pPlayerInfo.GetPos(), 4000.0f, true);
+			if(!vccoop::Active()) CWorld::ClearExcitingStuffFromArea(pPlayerInfo.GetPos(), 4000.0f, true);
 			CRestart::FindClosestPoliceRestartPoint(pPlayerInfo.GetPos(), &vecRestartPos, &fRestartFloat);
 			CRestart::OverridePoliceStationLevel = LEVEL_GENERIC;
 			CRestart::OverrideHospitalLevel = LEVEL_GENERIC;
@@ -356,6 +366,7 @@ CGameLogic::Update()
 void
 CGameLogic::RestorePlayerStuffDuringResurrection(CPlayerPed *pPlayerPed, CVector pos, float angle)
 {
+    vccoop::PlayerRespawned(pPlayerPed);
 	ClearShortCut();
 	CPlayerInfo* pPlayerInfo = pPlayerPed->GetPlayerInfoForThisPlayerPed();
 	pPlayerPed->m_fHealth = pPlayerInfo->m_nMaxHealth;
@@ -387,8 +398,8 @@ CGameLogic::RestorePlayerStuffDuringResurrection(CPlayerPed *pPlayerPed, CVector
 	pPlayerPed->m_fRotationCur = DEGTORAD(angle);
 	pPlayerPed->m_fRotationDest = pPlayerPed->m_fRotationCur;
 	pPlayerPed->SetHeading(pPlayerPed->m_fRotationCur);
-	CTheScripts::ClearSpaceForMissionEntity(pos, pPlayerPed);
-	CWorld::ClearExcitingStuffFromArea(pos, 4000.0f, true);
+	if(!vccoop::Active()) CTheScripts::ClearSpaceForMissionEntity(pos, pPlayerPed);
+	if(!vccoop::Active()) CWorld::ClearExcitingStuffFromArea(pos, 4000.0f, true);
 	pPlayerPed->RestoreHeadingRate();
 	CGame::currArea = AREA_MAIN_MAP;
 	CStreaming::RemoveBuildingsNotInArea(AREA_MAIN_MAP);

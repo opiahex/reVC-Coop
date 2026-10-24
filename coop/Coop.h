@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-class CPickup;
+class CPickup; class CCopPed; class CHeli;
 class CPlayerPed; class CPlayerInfo; class CWanted;
 class CEntity; class CPhysical; class CPed; class CVehicle; class CVector; class CObject;
 namespace vccoop {
@@ -15,6 +15,11 @@ class NpcPlayerScope {
 public: explicit NpcPlayerScope(CPhysical*,CEntity* aggressor=nullptr);~NpcPlayerScope();
 };
 bool RemoteWanted(CWanted*);
+bool RouteArrest(CCopPed*,CPed*);
+bool TestHeliCollision(unsigned,const CVector&,const CVector&,CVector*,unsigned,CEntity*);
+void HeliDestroyed(CHeli*);
+bool SelectRespawnPoint(CVector&,float);
+void PlayerRespawned(CPlayerPed*);
 uint32_t CrimeIdentity(CEntity*);
 bool RouteCrime(CWanted*,int,const CVector&,uint32_t,bool,bool);
 bool RouteWanted(CWanted*,int);

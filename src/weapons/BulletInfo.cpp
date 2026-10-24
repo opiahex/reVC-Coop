@@ -294,7 +294,7 @@ void CBulletInfo::Update(void)
 			PlayerSniperBulletEnd = vecNewPos;
 		}
 		pBullet->m_vecPosition = vecNewPos;
-		CHeli::TestSniperCollision(&PlayerSniperBulletStart, &PlayerSniperBulletEnd);
+		if(pBullet->m_eWeaponType==WEAPONTYPE_SNIPERRIFLE || pBullet->m_eWeaponType==WEAPONTYPE_LASERSCOPE) CHeli::TestSniperCollision(&PlayerSniperBulletStart, &PlayerSniperBulletEnd,pBullet->m_pSource);
 	}
 }
 

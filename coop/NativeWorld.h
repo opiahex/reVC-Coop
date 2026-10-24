@@ -29,6 +29,7 @@ public:
     void Attach(CPed*,const vc::PlayerState&);
     void DescribeVehicle(CPed*,vc::PlayerState&) const;
     bool CanEnter(CPed*,CVehicle*);
+    void CancelLocalEntry();
     bool Passenger();
     bool Event(const vc::Message&);
     bool RouteDamage(CEntity*,CEntity*,int,float,int,uint8_t);

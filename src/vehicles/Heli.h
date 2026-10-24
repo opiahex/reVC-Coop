@@ -87,9 +87,12 @@ public:
 	static CHeli *GenerateHeli(bool catalina); // out of class in III PC and later because of SecuROM
 	static void UpdateHelis(void);
 	static void SpecialHeliPreRender(void);
-	static bool TestRocketCollision(CVector *coors);
-	static bool TestBulletCollision(CVector *line0, CVector *line1, CVector *bulletPos, int32 damage);
-	static bool TestSniperCollision(CVector *line0, CVector *line1);
+	static bool TestRocketCollision(CVector *coors,CEntity* source=nullptr);
+	static bool TestBulletCollision(CVector *line0, CVector *line1, CVector *bulletPos, int32 damage,CEntity* source=nullptr);
+	static bool TestSniperCollision(CVector *line0, CVector *line1,CEntity* source=nullptr);
+    void ApplyNetworkHit(unsigned mode,unsigned damage);
+    uint8 ComponentMask() const;
+    void SetComponentMask(uint8);
 
 	static void StartCatalinaFlyBy(void); // out of class in III PC and later because of SecuROM
 	static void RemoveCatalinaHeli(void);

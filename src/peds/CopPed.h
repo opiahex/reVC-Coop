@@ -41,6 +41,7 @@ public:
 	void ClearPursuit(void);
 	void ProcessControl(void);
 	void SetArrestPlayer(CPed*);
+	void ApplyArrest(CPed*);
 	void SetPursuit(bool);
 	void ArrestPlayer(void);
 	void ScanForCrimes(void);

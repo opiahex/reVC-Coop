@@ -88,6 +88,6 @@ public:
 };
 VALIDATE_SIZE(CWeapon, 0x18);
 
-void FireOneInstantHitRound(CVector *source, CVector *target, int32 damage);
+void FireOneInstantHitRound(CVector *source, CVector *target, int32 damage,CEntity* shooter=nullptr);
 
 #endif // __GTA_WEAPON_H__

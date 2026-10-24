@@ -592,3 +592,90 @@ Final installed binary SHA-256:
 matched the build and both test game copies. Both games used direct port 7781,
 with normal input and 60 FPS limits restored after testing.
 Local test scripts, captures and the private roadmap are excluded from commits.
+
+## Native 0.2.8: arrest, respawn and police-helicopter combat
+
+Based on c74dd6d. The native death/arrest path cleared nearby NPCs, vehicles,
+pickups and effects and advanced the shared clock by 12 hours. Online recovery
+now preserves the running world. Native penalties, weapon loss, messages, fades
+and local player restoration remain. The streaming pass loads the destination
+without globally discarding active models. A recovery waits for loaded, clear
+ground before charging the penalty, checks body clearance and separates players.
+The player's area returns to the main map. Simultaneous recovery chooses different
+candidate directions and also checks already occupied positions.
+
+Each restoration advances the player's life ID, including arrests with unchanged
+health. Replicas are recreated for a new life; old damage/arrest messages retain
+the previous life ID and cannot affect the recovered player. Cop pursuit and
+vehicle occupancy references are cleared for that participant.
+
+Native cop arrest decisions now reach the suspect's game. The server checks cop
+ownership/generation, target epoch/life, wanted level, health, area and distance,
+and forwards one arrest per life. The receiver waits briefly for a missing cop
+replica, cancels unfinished vehicle entry and invokes the native arrest routine.
+Late seat grants cannot restart entry while arrested or dead. A replica's cop
+state timer is not used to reject the other game's native arrest decision. Entering/leaving arrest and death
+states use reliable player transitions. The innocent participant keeps playing.
+
+Police-helicopter hits run through the existing native bullet, pilot and rocket
+collision entry points with an explicit attacker. The owner applies committed
+hits; the other games replay effects and snapshots. State includes damage and
+component visibility. The server keeps fatal-hit credit and accepts destruction
+only from the helicopter's owner. The actual player receives the native $250
+reward and crime once. Airborne/vehicle gun rounds now carry their source entity,
+so damage, tracers, impacts and shot sound reach other participants. A rocket's
+heli proximity check runs before an ordinary collision can short-circuit it.
+Helicopter explosions identify the helicopter as their source instead of
+implicitly making the host responsible.
+
+Two additional native faults were found during acceptance. The searchlight fade
+used 1-(40-distance)/20 between 40 and 60 metres, producing values above 1.
+The wire validator correctly rejected those snapshots, leaving the guest's
+helicopter frozen at an old position. The fade now runs from 1 down to 0, with
+regression checks at the range boundaries and midpoint. A strict '<' previous-time
+comparison also skipped the tail explosion when a fixed simulation step landed
+exactly on its threshold; the crossing includes equality now.
+
+SA-Coop references, read locally without modifying the reference checkout:
+[Players.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/entities/player/Players.cpp)
+for owner-decided death, replacing dead replicas and separating respawns;
+[time-weather/World.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/features/time-weather/World.cpp)
+for preserving shared time during a participant's recovery. Reference SHA-256:
+Players.cpp `ae24e4a3d7e5f791d915059c4722a6080b2ea925b164e2b6ee7ec9a1436df7e3`;
+World.cpp `c4bbc91fb08c70ad989c90420384d3b8be6681752b5c0bd6cbda461fd79ff676`.
+The native implementation uses engine classes; no SA addresses or hooks were
+copied. Its existing MIT notice remains in coop/vendor/sa-coop.LICENSE.
+
+Verification: tools/build-coop.ps1 -Test passes 491 checks. New coverage exercises
+arrest identity, ownership, distance, innocent targets, repeated requests and new
+lives; helicopter hit validation, component/damage serialization, fatal credit,
+owner-only destruction, duplicate rewards and searchlight bounds. Protocol is 22.
+
+Two native games verified passenger death without deleting the host's occupied
+vehicle, simultaneous death/recovery on clear ground with 2.77 m separation,
+normal pistol fire after recovery, and guest arrest through native restoration
+while the host remained alive and innocent. An initial arrest used an explicit
+cop-action fixture. The final run used normal vehicle entry: the native cop
+initiated the guest's arrest without a forced-arrest command, the guest recovered,
+and the host could enter the same car normally afterwards. Normal cop pursuit
+and firing were tested separately.
+Guest M4 firing then used normal pad, camera and weapon/hitscan processing and
+produced real helicopter hits on the owner. The sandbox fixture only steered the
+stock reticle at the moving target; it did not forge these hits. This longer
+movement test exposed the searchlight snapshot rejection described above.
+
+Separate native collision fixtures exercised the bullet damage threshold and
+rocket destruction path. Both games showed the same shot-down helicopter, the
+254-to-230 component visibility change, two explosion events and removal. The
+guest received exactly $250 while host money and wanted stayed unchanged. The
+final build repeated aircraft gun damage, rocket collision/destruction and guest
+arrest. These fixtures do not establish end-to-end accuracy of a flown rocket or
+a naturally aimed pilot headshot. Detached physical debris trajectories and all
+wanted tiers still require further native/WAN testing. Campaign progression,
+cutscenes and shared saves remain unported; this is still a free-roam build.
+
+Installed executable SHA-256:
+`2010ea50db042ca6afff90ce354554302f164c39d7c37258c368c27362f53b50`.
+The build and both test copies match. Both games retain normal input and 60 FPS
+limits after testing. Test scripts/captures and the private roadmap stay outside
+the source tree.

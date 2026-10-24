@@ -14,14 +14,14 @@
 
 namespace vc {
 inline constexpr uint32_t kMagic = 0x50434356; // VCCP, little endian
-inline constexpr uint16_t kProtocol = 20;
+inline constexpr uint16_t kProtocol = 22;
 inline constexpr uint8_t kMaxPlayers = 3, kNoPlayer = 255;
 inline constexpr size_t kClockChannel = 1 + kMaxPlayers, kChannels = kClockChannel + 1, kMaxPacket = 768;
 inline constexpr uint8_t kReady = 1, kInVehicle = 2, kDead = 4;
 inline constexpr size_t kAnimationLayers = 6;
 inline constexpr size_t kMaxEntities = 192, kMaxWorldObjects = 64;
 enum class Kind : uint8_t { Hello = 1, Welcome, Joined, Left, State, Rejected, Chat, Hit, Shot,
-    EntityCreate,EntityUpdate,EntityRemove,EntityClaim,EntityAuthority,EntityHit,SeatRequest,SeatGrant,VehicleContact,Population,Transition,MissionState,MissionCommand,MissionBarrier,MissionReady,MissionRelease,MissionVote,MissionVoteState,Radar,Explosion,ClockRequest,ClockReply,Environment,Crime,PickupCreate,PickupState,PickupRemove,PickupRequest,PickupGrant };
+    EntityCreate,EntityUpdate,EntityRemove,EntityClaim,EntityAuthority,EntityHit,SeatRequest,SeatGrant,VehicleContact,Population,Transition,MissionState,MissionCommand,MissionBarrier,MissionReady,MissionRelease,MissionVote,MissionVoteState,Radar,Explosion,ClockRequest,ClockReply,Environment,Crime,PickupCreate,PickupState,PickupRemove,PickupRequest,PickupGrant,Arrest,HeliHit,HeliDown,HeliReward };
 enum class Reason : uint8_t { None, Protocol, Full, RateLimit, Timeout, MissionBusy, MissionTimeout, MissionHostLeft };
 struct Vec3 { float x{}, y{}, z{}; };
 inline constexpr size_t kMaxPickups=512;
@@ -89,6 +89,18 @@ struct Crime {
     uint32_t epoch{},life{},witness{},generation{},id{};
     Vec3 position{};
 };
+struct HeliHit {
+    uint32_t target{},generation{},source{},sourceGeneration{},sourceLife{1};
+    uint8_t mode{};uint16_t damage{4};Vec3 point{};
+};
+inline bool ValidHeliHit(const HeliHit& h) {
+    return h.target && h.generation && h.sourceLife && bool(h.source)==bool(h.sourceGeneration) && h.mode<=2 && h.damage>0 && h.damage<=20
+        && std::isfinite(h.point.x) && std::abs(h.point.x)<=20000 && std::isfinite(h.point.y) && std::abs(h.point.y)<=20000 && std::isfinite(h.point.z) && std::abs(h.point.z)<=10000;
+}
+struct Arrest {
+    uint8_t target{kNoPlayer};uint32_t epoch{},life{},cop{},generation{};
+};
+inline bool ValidArrest(const Arrest& a) {return a.target<kMaxPlayers && a.epoch && a.life && a.cop && a.generation;}
 struct Contact {
     uint32_t source{},sourceGeneration{},target{},targetGeneration{};
     Vec3 move{},turn{}; // change in metres/second and radians/second
@@ -107,7 +119,7 @@ struct VehicleState {
     uint32_t panels{},lights{};
     std::array<float,6> doorAngles{};
     std::array<float,4> wheelAngle{},wheelOmega{},wheelPosition{},suspension{1,1,1,1};
-    float wheelSteer{},bikeLean{},rotor{},searchX{},searchY{},searchIntensity{};uint8_t heliStatus{};
+    float wheelSteer{},bikeLean{},rotor{},searchX{},searchY{},searchIntensity{};uint8_t heliStatus{},heliComponents{254};uint16_t heliDamage{};
 };
 struct ObjectState { Transform transform; Vec3 turn{}; uint8_t flags{1}; }; // visible, collision, broken glass/explosion
 struct Entity {
@@ -136,6 +148,8 @@ struct Message {
     Shot shot{};
     Contact contact;
     Crime crime;
+    Arrest arrest;
+    HeliHit heli;
     Pickup pickup;
     Explosion explosion;
     Entity entity;
@@ -242,6 +256,7 @@ inline bool ValidEntity(const Entity& e) {
     if(e.kind!=EntityKind::Vehicle || e.model<130 || e.model>236) return false;
     const auto& v=e.vehicle;
     if(!std::isfinite(v.rotor) || std::abs(v.rotor)>7 || !std::isfinite(v.searchX) || std::abs(v.searchX)>20000 || !std::isfinite(v.searchY) || std::abs(v.searchY)>20000 || !std::isfinite(v.searchIntensity) || v.searchIntensity<0 || v.searchIntensity>1 || v.heliStatus>5) return false;
+    if((v.heliComponents&1) || v.heliDamage>1000) return false;
     if(!ValidTransform(v.transform) || !ValidPoint(v.turn,50) || !std::isfinite(v.health) || v.health<0 || v.health>10000
         || !std::isfinite(v.steer) || std::abs(v.steer)>2 || !std::isfinite(v.gas) || std::abs(v.gas)>1.1f
         || !std::isfinite(v.brake) || v.brake<0 || v.brake>1.1f || v.type>5 || v.type==2 || v.gear>10 || v.flags>15 || v.passengers>8
@@ -298,7 +313,7 @@ struct Writer {
             U32(v.panels); U32(v.lights);
             for(auto angle:v.doorAngles) F32(angle);
             for(size_t i=0;i<4;++i) { F32(v.wheelAngle[i]); F32(v.wheelOmega[i]); F32(v.wheelPosition[i]); F32(v.suspension[i]); }
-            F32(v.wheelSteer);F32(v.bikeLean);F32(v.rotor);F32(v.searchX);F32(v.searchY);F32(v.searchIntensity);U8(v.heliStatus);
+            F32(v.wheelSteer);F32(v.bikeLean);F32(v.rotor);F32(v.searchX);F32(v.searchY);F32(v.searchIntensity);U8(v.heliStatus);U8(v.heliComponents);U16(v.heliDamage);
         }
     }
 };
@@ -344,7 +359,7 @@ struct Reader {
             for(auto& b:v.wheels) b=U8();
             v.panels=U32(); v.lights=U32();             for(auto& angle:v.doorAngles) angle=F32();
             for(size_t i=0;i<4;++i) { v.wheelAngle[i]=F32(); v.wheelOmega[i]=F32(); v.wheelPosition[i]=F32(); v.suspension[i]=F32(); }
-            v.wheelSteer=F32();v.bikeLean=F32();v.rotor=F32();v.searchX=F32();v.searchY=F32();v.searchIntensity=F32();v.heliStatus=U8();
+            v.wheelSteer=F32();v.bikeLean=F32();v.rotor=F32();v.searchX=F32();v.searchY=F32();v.searchIntensity=F32();v.heliStatus=U8();v.heliComponents=U8();v.heliDamage=U16();
         } else ok=false;
         return e;
     }
@@ -363,6 +378,9 @@ inline std::vector<uint8_t> Encode(const Message& m) {
             for(auto b:{p.creator,p.type,p.area,p.flags,p.status,p.takenBy}) w.U8(b);
             w.U16(p.model);w.U16(p.rate);w.Vector(p.position);w.U8(m.id);w.U32(m.hit.targetEpoch);w.U32(m.hit.life);break;
         }
+        case Kind::HeliHit: {const auto& h=m.heli;w.U32(h.target);w.U32(h.generation);w.U32(h.source);w.U32(h.sourceGeneration);w.U32(h.sourceLife);w.U8(h.mode);w.U16(h.damage);w.Vector(h.point);break;}
+        case Kind::HeliDown:case Kind::HeliReward: w.U32(m.heli.target);w.U32(m.heli.generation);w.U32(m.hit.targetEpoch);w.U32(m.hit.life);break;
+        case Kind::Arrest: {const auto& a=m.arrest;w.U8(a.target);w.U32(a.epoch);w.U32(a.life);w.U32(a.cop);w.U32(a.generation);break;}
         case Kind::PickupRequest:case Kind::PickupRemove: w.U32(m.pickup.id);w.U32(m.pickup.revision);w.U8(m.id);w.U32(m.hit.life);break;
         case Kind::Crime: {
             const auto& c=m.crime;w.U8(c.target);w.U8(c.type);w.U8(c.flags);w.U8(c.minimum);
@@ -434,6 +452,9 @@ inline bool Decode(std::span<const uint8_t> bytes, Message& output) {
             m.id=r.U8();m.hit.targetEpoch=r.U32();m.hit.life=r.U32();
             if(!ValidPickup(p) || (m.kind!=Kind::PickupCreate && !p.id) || (m.kind==Kind::PickupGrant && (m.id>1 || !m.hit.targetEpoch || !m.hit.life))) return false;break;
         }
+        case Kind::HeliHit: {auto& h=m.heli;h.target=r.U32();h.generation=r.U32();h.source=r.U32();h.sourceGeneration=r.U32();h.sourceLife=r.U32();h.mode=r.U8();h.damage=r.U16();h.point=r.Vector();if(!ValidHeliHit(h))return false;break;}
+        case Kind::HeliDown:case Kind::HeliReward: m.heli.target=r.U32();m.heli.generation=r.U32();m.hit.targetEpoch=r.U32();m.hit.life=r.U32();if(!m.heli.target || !m.heli.generation || (m.kind==Kind::HeliReward && (!m.hit.targetEpoch || !m.hit.life)))return false;break;
+        case Kind::Arrest: {auto& a=m.arrest;a.target=r.U8();a.epoch=r.U32();a.life=r.U32();a.cop=r.U32();a.generation=r.U32();if(!ValidArrest(a)) return false;break;}
         case Kind::PickupRequest:case Kind::PickupRemove:
             m.pickup.id=r.U32();m.pickup.revision=r.U32();m.id=r.U8();m.hit.life=r.U32();
             if(!m.pickup.id || !m.pickup.revision || m.id>1 || !m.hit.life) return false;break;
