@@ -5,6 +5,17 @@
 #include <set>
 
 namespace vc {
+namespace {
+void ConfigurePeer(ENetPeer* peer) {
+    enet_peer_timeout(peer,32,3000,10000);
+    // Native asset loading can briefly increase RTT without saturating the
+    // link. The stock 5 s minimum/slow recovery discarded entire streams of
+    // unreliable NPC updates on localhost. Re-evaluate that minimum sooner and
+    // recover on frequent acknowledgements while retaining ENet's throttling.
+    enet_peer_ping_interval(peer,100);
+    enet_peer_throttle_configure(peer,1000,8,1);
+}
+}
 bool SendPacket(ENetPeer* peer,const Message& m,uint8_t channel,bool reliable) {
     auto bytes=Encode(m);
     auto* packet=enet_packet_create(bytes.data(),bytes.size(),reliable ? ENET_PACKET_FLAG_RELIABLE : 0);
@@ -26,7 +37,8 @@ bool Server::Start(uint16_t port,const std::string& bind) {
 }
 void Server::Stop() {
     if (socket_) enet_host_destroy(socket_);
-    socket_=nullptr; peers_.clear(); entities_.clear(); host_=kNoPlayer; nextEpoch_=nextEntity_=0; population_=0; hasMission_=false; missionSequence_=0; missionBarrier_={}; vote_={}; radar_={}; hasRadar_={};
+    hasEnvironment_=false;environment_={};environmentAt_=0;
+    socket_=nullptr; peers_.clear(); entities_.clear();pickups_.clear();nextPickup_=0; host_=kNoPlayer; nextEpoch_=nextEntity_=0; population_=0; hasMission_=false; missionSequence_=0; missionBarrier_={}; vote_={}; radar_={}; hasRadar_={};
 }
 void Server::Broadcast(const Message& m,ENetPeer* except,uint8_t channel,bool reliable) {
     for (auto& [peer,p] : peers_) if (peer!=except && p.id!=kNoPlayer && !p.rejected) SendPacket(peer,m,channel,reliable);
@@ -45,13 +57,13 @@ void Server::Remove(ENetPeer* peer) {
     auto it=peers_.find(peer); if (it==peers_.end()) return;
     auto id=it->second.id; const bool storyHost=id==host_ && hasMission_ && missionState_.mission.active; peers_.erase(it);
     if (id==kNoPlayer) return;
-    if(id==host_) { hasMission_=false; missionSequence_=0; missionBarrier_={}; vote_={}; radar_={}; hasRadar_={}; SendVote(); }
+    if(id==host_) { hasEnvironment_=false;environment_={};environmentAt_=0;hasMission_=false; missionSequence_=0; missionBarrier_={}; vote_={}; radar_={}; hasRadar_={}; SendVote(); }
     if (id==host_) {
         host_=kNoPlayer;
         for (const auto& [key,p] : peers_) if (p.id!=kNoPlayer && (host_==kNoPlayer || p.id<host_)) host_=p.id;
     }
     Message m; m.kind=Kind::Left; m.id=id; m.host=host_; Broadcast(m);
-    if(host_==kNoPlayer) entities_.clear();
+    if(host_==kNoPlayer) {entities_.clear();pickups_.clear();}
     else {
         std::set<uint32_t> occupied;
         for(const auto& [target,p]:peers_) { (void)target; if(p.hasState && p.lastState.state.health>0 && p.lastState.state.vehicle) occupied.insert(p.lastState.state.vehicle); }
@@ -92,7 +104,7 @@ void Server::Receive(ENetPeer* peer,const ENetEvent& event) {
     auto it=peers_.find(peer); if (it==peers_.end() || it->second.rejected) return;
     auto& p=it->second; Message m;
     if (!Decode({event.packet->data,event.packet->dataLength},m) || m.sender!=kNoPlayer || m.epoch!=0) { Reject(peer,Reason::Protocol); return; }
-    auto now=NowMs(); if (now-p.window>=1000) { p.window=now; p.states=p.controls=p.hits=p.shots=p.entityUpdates=p.entityControls=p.missionEvents=0; }
+    auto now=NowMs(); if (now-p.window>=1000) { p.window=now; p.states=p.controls=p.hits=p.shots=p.entityUpdates=p.entityControls=p.missionEvents=p.clocks=p.crimes=p.pickups=0; }
     if (m.kind==Kind::Hello && p.id==kNoPlayer && event.channelID==0) {
         if (++p.controls>8) { Reject(peer,Reason::RateLimit); return; }
         if(missionBarrier_.token || (hasMission_ && missionState_.mission.cinematic)) { Reject(peer,Reason::MissionBusy); return; }
@@ -108,12 +120,29 @@ void Server::Receive(ENetPeer* peer,const ENetEvent& event) {
         }
         Message joined; joined.kind=Kind::Joined; joined.id=id; joined.name=p.name; joined.epoch=p.epoch; Broadcast(joined,peer);
         for(const auto& [key,e]:entities_) { Message spawn; spawn.kind=Kind::EntityCreate; spawn.entity=e.state; SendPacket(peer,spawn); }
+        for(const auto& [key,pickup]:pickups_) {Message baseline;baseline.kind=Kind::PickupState;baseline.pickup=pickup.state;SendPacket(peer,baseline);}
         Message policy; policy.kind=Kind::Population; policy.population=population_; SendPacket(peer,policy);
+        if(hasEnvironment_) SendPacket(peer,environment_); // baseline follows the reliable roster
         if(hasMission_) SendPacket(peer,missionState_);
         for(size_t i=0;i<kRadarSlots;++i) if(hasRadar_[i]) SendPacket(peer,radar_[i]);
         if (log) log("player "+std::to_string(id)+" joined: "+p.name);
         return;
     }
+    if(m.kind==Kind::Environment && p.id<kMaxPlayers) {
+        if(p.id!=host_ || event.channelID!=1) {Reject(peer,Reason::Protocol);return;}
+        if(hasEnvironment_ && !Newer(m.sequence,environment_.sequence)) return;
+        // Weather snapshots are replaceable; never backlog the reliable event queue.
+        if(now-environmentAt_<15) return;
+        m.sender=p.id;m.epoch=p.epoch;environment_=m;hasEnvironment_=true;environmentAt_=now;
+        Broadcast(m,peer,1+p.id,false);return;
+    }
+    if(m.kind==Kind::ClockRequest && p.id<kMaxPlayers && event.channelID==kClockChannel) {
+        if(++p.clocks>16) {Reject(peer,Reason::RateLimit);return;}
+        Message reply;reply.kind=Kind::ClockReply;reply.sequence=m.sequence;reply.clockClientMs=m.clockClientMs;
+        reply.clockServerInMs=now;reply.clockServerOutMs=NowMs();SendPacket(peer,reply,kClockChannel,false);return;
+    }
+    // Discard impossible source clocks; an unsynchronized peer uses the staging-age fallback.
+    if(m.sampleTimeMs && (m.sampleTimeMs>now+100 || m.sampleTimeMs+2000<now)) m.sampleTimeMs=0;
     if(m.kind==Kind::Radar && p.id!=kNoPlayer) {
         if(p.id!=host_ || event.channelID || ++p.missionEvents>1500) { Reject(peer,Reason::Protocol); return; }
         const auto slot=m.radar.slot; if(hasRadar_[slot] && !Newer(m.sequence,radar_[slot].sequence)) return;
@@ -132,6 +161,29 @@ void Server::Receive(ENetPeer* peer,const ENetEvent& event) {
         const float dx=origin.x-blast.position.x,dy=origin.y-blast.position.y,dz=origin.z-blast.position.z;
         if(dx*dx+dy*dy+dz*dz>2000*2000) return;
         m.sender=p.id;m.epoch=p.epoch;Broadcast(m,peer);return;
+    }
+    if(m.kind>=Kind::PickupCreate && m.kind<=Kind::PickupGrant && p.id<kMaxPlayers) {
+        if(event.channelID || ++p.pickups>1024 || m.kind==Kind::PickupGrant || m.kind==Kind::PickupState) {Reject(peer,Reason::Protocol);return;}
+        ReceivePickup(peer,p,m);return;
+    }
+    if(m.kind==Kind::Crime && p.id<kMaxPlayers && event.channelID==0) {
+        if(++p.crimes>120) {Reject(peer,Reason::RateLimit);return;}
+        const auto& c=m.crime;
+        for(const auto& [target,t]:peers_) if(t.id==c.target && t.epoch==c.epoch && t.hasState
+            && t.lastState.state.life==c.life && t.lastState.state.health>0) {
+            auto origin=t.lastState.state.position;auto area=t.lastState.state.area;
+            if(c.witness) {
+                auto it=entities_.find(c.witness);if(it==entities_.end()) return;
+                const auto& e=it->second.state;
+                if(e.owner!=p.id || e.ownerEpoch!=p.epoch || e.generation!=c.generation || e.area!=area) return;
+                auto v=EntityPosition(e);float dx=v.x-origin.x,dy=v.y-origin.y,dz=v.z-origin.z;
+                if(dx*dx+dy*dy+dz*dz>120*120) return;
+            } else if(!(population_&(1u<<p.id)) || !p.hasState || p.lastState.state.area!=area) return;
+            float dx=c.position.x-origin.x,dy=c.position.y-origin.y,dz=c.position.z-origin.z;
+            if(dx*dx+dy*dy+dz*dz>40*40) return;
+            m.sender=p.id;m.epoch=p.epoch;SendPacket(target,m);return;
+        }
+        return;
     }
     if (m.kind==Kind::Chat && p.id!=kNoPlayer && event.channelID==0) {
         if (now-p.chatWindow>=1000) { p.chatWindow=now; p.chats=0; }
@@ -169,6 +221,70 @@ void Server::Receive(ENetPeer* peer,const ENetEvent& event) {
     p.hasState=true; p.sequence=m.sequence; m.sender=p.id; m.epoch=p.epoch; p.lastState=m; RefreshPopulation();
     Broadcast(m,peer,m.kind==Kind::Transition ? 0:uint8_t(1+p.id),m.kind==Kind::Transition);
 }
+void Server::ReceivePickup(ENetPeer* peer,Peer& owner,Message& m) {
+    auto now=NowMs();
+    if(!owner.hasState || !(owner.lastState.state.flags&kReady)) return;
+    auto broadcast=[&](const Pickup& p){Message state;state.kind=Kind::PickupState;state.pickup=p;Broadcast(state);};
+    if(m.kind==Kind::PickupCreate) {
+        auto p=m.pickup;p.creator=owner.id;p.creatorEpoch=owner.epoch;p.id=0;p.revision=1;p.status=0;p.takenBy=kNoPlayer;
+        auto d=p.position,a=owner.lastState.state.position;float dx=d.x-a.x,dy=d.y-a.y,dz=d.z-a.z;
+        bool ownedDrop=false;
+        if(p.source) {
+            auto source=entities_.find(p.source);if(source==entities_.end()) return;const auto& e=source->second.state;
+            auto pos=EntityPosition(e);float x=d.x-pos.x,y=d.y-pos.y,z=d.z-pos.z;
+            ownedDrop=e.owner==owner.id && e.ownerEpoch==owner.epoch && e.generation==p.sourceGeneration && e.kind==EntityKind::Ped && x*x+y*y+z*z<16*16;
+            if(!ownedDrop) return;
+        }
+        bool nearbyPersonal=(p.type==4 || p.type==5 || p.type==8) && dx*dx+dy*dy+dz*dz<64;
+        if(owner.id!=host_ && !ownedDrop && !nearbyPersonal && (!(population_&(1u<<owner.id)) || (p.area!=13 && p.area!=owner.lastState.state.area) || dx*dx+dy*dy+dz*dz>220*220)) return;
+        for(const auto& [id,existing]:pickups_) {
+            const auto& q=existing.state;auto b=q.position;
+            bool ephemeral=p.type==4 || p.type==5 || p.type==8;
+            bool same=ephemeral?(q.creator==owner.id && q.creatorEpoch==owner.epoch && q.key==p.key):
+                (q.type==p.type && q.model==p.model && q.area==p.area && std::abs(d.x-b.x)<.12f && std::abs(d.y-b.y)<.12f && std::abs(d.z-b.z)<.12f);
+            if(same) {Message state;state.kind=Kind::PickupState;state.pickup=q;SendPacket(peer,state);return;}
+        }
+        if(pickups_.size()>=kMaxPickups) return;
+        p.id=++nextPickup_;pickups_[p.id]={p,p.remaining?now+p.remaining:0};broadcast(p);return;
+    }
+    auto it=pickups_.find(m.pickup.id);if(it==pickups_.end()) return;auto& entry=it->second;auto& p=entry.state;
+    if(p.revision!=m.pickup.revision || p.status) return;
+    if(m.kind==Kind::PickupRemove) {
+        if(p.creator!=owner.id || p.creatorEpoch!=owner.epoch) return;
+        p.status=2;++p.revision;entry.deadline=0;broadcast(p);return;
+    }
+    if(owner.lastState.state.life!=m.hit.life || owner.lastState.state.health<=0 || (p.area!=13 && owner.lastState.state.area!=p.area)) return;
+    auto a=owner.lastState.state.position,b=p.position;float dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;
+    if(dx*dx+dy*dy+dz*dz>6*6 || (m.id && ((p.flags&1) && !p.quantity))) return;
+    // Commit first, then award exactly one participant. A second concurrent
+    // request for this revision cannot grant ammo/money again.
+    Message grant;grant.kind=Kind::PickupGrant;grant.pickup=p;grant.pickup.takenBy=owner.id;grant.id=m.id;grant.hit.targetEpoch=owner.epoch;grant.hit.life=m.hit.life;
+    p.takenBy=owner.id;++p.revision;
+    if(m.id) {p.flags|=1;p.quantity=0;}
+    else {
+        p.flags|=2;
+        if(p.type==2 || p.type==15) {p.status=1;p.remaining=p.type==2?30000:p.model==375?300000:720000;entry.deadline=now+p.remaining;}
+        else {p.status=2;entry.deadline=(p.type==4 || p.type==5 || p.type==8)?now+15000:0;}
+    }
+    SendPacket(peer,grant);broadcast(p);
+}
+void Server::TickPickups() {
+    auto now=NowMs();std::vector<uint32_t> retired;
+    for(auto& [id,entry]:pickups_) {
+        auto& p=entry.state;if(!entry.deadline || now<entry.deadline) continue;
+        if(p.status==2) {p.status=3;++p.revision;Message forget;forget.kind=Kind::PickupState;forget.pickup=p;Broadcast(forget);retired.push_back(id);continue;}
+        if(p.status==1) {
+            bool nearbyPlayer=false;
+            for(const auto& [peer,player]:peers_) if(player.hasState && (player.lastState.state.flags&kReady)
+                && PickupRespawnBlocked(p,player.lastState.state.position,player.lastState.state.area)) nearbyPlayer=true;
+            if(nearbyPlayer) continue;
+            p.status=0;p.flags&=uint8_t(~2u);p.takenBy=kNoPlayer;
+        } else if(!p.status) {p.status=2;p.takenBy=kNoPlayer;}
+        else continue;
+        entry.deadline=p.status==2 && (p.type==4 || p.type==5 || p.type==8)?now+15000:0;p.remaining=0;++p.revision;Message state;state.kind=Kind::PickupState;state.pickup=p;Broadcast(state);
+    }
+    for(auto id:retired) pickups_.erase(id);
+}
 bool Server::AttackOrigin(const Peer& p,uint32_t source,uint32_t generation,Vec3& position,uint8_t& area) const {
     if(!source) {
         if(!p.hasState || !(p.lastState.state.flags&kReady) || p.lastState.state.health<=0) return false;
@@ -199,6 +315,16 @@ void Server::ReceiveEntity(ENetPeer* peer,Peer& p,Message& m,uint8_t channel) {
         return;
     }
     if(m.kind==Kind::EntityCreate) {
+        if(state.kind==EntityKind::Object && !state.mission && !(state.object.flags&64)) {
+            for(const auto& [id,entry]:entities_) {
+                const auto& known=entry.state;auto a=known.origin,b=state.origin;
+                if(known.kind!=EntityKind::Object || known.mission || (known.object.flags&64) || known.model!=state.model || known.area!=state.area) continue;
+                const float dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;
+                if(dx*dx+dy*dy+dz*dz<.01f) {
+                    Message original;original.kind=Kind::EntityCreate;original.entity=known;SendPacket(peer,original);return;
+                }
+            }
+        }
         if(state.id || !p.hasState || !(p.lastState.state.flags&kReady)) return;
         for(const auto& [key,existing]:entities_) if(existing.state.creator==p.id && existing.state.creatorEpoch==p.epoch && existing.state.key==state.key) {
             Message reply; reply.kind=Kind::EntityCreate; reply.entity=existing.state; SendPacket(peer,reply); return;
@@ -311,7 +437,7 @@ void Server::Poll(uint32_t wait) {
     while (count++<128 && enet_host_service(socket_,&event,count==1 ? wait : 0)>0) {
         switch (event.type) {
             case ENET_EVENT_TYPE_CONNECT: {
-                enet_peer_timeout(event.peer,32,3000,10000);
+                ConfigurePeer(event.peer);
                 Peer p; p.connected=p.window=NowMs(); peers_.emplace(event.peer,std::move(p));
                 if (event.data!=kProtocol) Reject(event.peer,Reason::Protocol);
                 break;
@@ -322,6 +448,7 @@ void Server::Poll(uint32_t wait) {
             default: break;
         }
     }
+    TickPickups();
     if(vote_.open && NowMs()-voteAt_>15000) { vote_.open=vote_.yes=0; vote_.declined=255; SendVote(); }
     std::vector<ENetPeer*> expired;
     for (const auto& [peer,p] : peers_) if (p.id==kNoPlayer && NowMs()-p.connected>5000) expired.push_back(peer);
@@ -331,6 +458,11 @@ void Server::Poll(uint32_t wait) {
         for(const auto& [target,p]:peers_) if(p.id<kMaxPlayers && !(missionBarrier_.ready&(1u<<p.id))) slow.push_back(target);
         for(auto* target:slow) Reject(target,Reason::MissionTimeout);
         ReleaseMissionBarrier();
+    }
+    if(log && NowMs()-transportLogAt_>=2000) {
+        transportLogAt_=NowMs();
+        for(const auto& [peer,p]:peers_) if(p.id<kMaxPlayers)
+            log("transport id="+std::to_string(p.id)+" throttle="+std::to_string(peer->packetThrottle)+"/32 rtt="+std::to_string(peer->roundTripTime)+" variance="+std::to_string(peer->roundTripTimeVariance)+" queued="+std::to_string(enet_list_size(&peer->outgoingCommands)));
     }
     enet_host_flush(socket_);
 }
@@ -350,12 +482,24 @@ bool Client::Connect(const std::string& address,uint16_t port,const std::string&
 void Client::Disconnect() {
     if (server_) { enet_peer_disconnect_now(server_,0); if (socket_) enet_host_flush(socket_); }
     if (socket_) enet_host_destroy(socket_);
-    socket_=nullptr; server_=nullptr; self_=host_=kNoPlayer; population_=0; sequence_=0; hasPublished_=false; published_={}; players_={}; chats_.clear(); events_.clear(); entities_.clear(); mission_={}; vote_={}; radar_={}; hasMission_=false; missionSequence_=0; status_=Connection::Offline;
+    environment_={};hasEnvironment_=false;environmentSequence_=0;
+    clock_.Clear();clockAt_=0;clockSequence_=0;clockPending_.clear();
+    socket_=nullptr; server_=nullptr; self_=host_=kNoPlayer; population_=0; sequence_=0; hasPublished_=false; published_={}; players_={}; chats_.clear(); events_.clear(); entities_.clear();pickups_.clear(); mission_={}; vote_={}; radar_={}; hasMission_=false; missionSequence_=0; status_=Connection::Offline;
 }
 void Client::Fail(const std::string& error) { Disconnect(); error_=error; }
 void Client::Receive(std::span<const uint8_t> bytes,uint8_t channel) {
     Message m;
     if (!Decode(bytes,m)) { Fail("Invalid server packet"); return; }
+    if(m.kind==Kind::Environment) {
+        if(status_!=Connection::Online || m.sender!=host_ || host_>=kMaxPlayers || (channel!=0 && channel!=1+host_) || !players_[host_].active || m.epoch!=players_[host_].epoch) return;
+        if(!hasEnvironment_ || Newer(m.sequence,environmentSequence_)) {environment_=m.environment;hasEnvironment_=true;environmentSequence_=m.sequence;}
+        return;
+    }
+    if(m.kind==Kind::ClockReply) {
+        if(status_!=Connection::Online || channel!=kClockChannel || m.sender!=kNoPlayer || m.epoch) return;
+        auto it=clockPending_.find(m.sequence);if(it==clockPending_.end() || it->second!=m.clockClientMs) return;
+        clock_.Observe(it->second,m.clockServerInMs,m.clockServerOutMs,NowMs());clockPending_.erase(it);return;
+    }
     if(m.kind==Kind::Radar) {
         if(status_!=Connection::Online || channel || m.sender!=host_ || host_>=kMaxPlayers || !players_[host_].active || m.epoch!=players_[host_].epoch) { Fail("Invalid radar authority"); return; }
         auto& entry=radar_[m.radar.slot]; if(!entry.known || Newer(m.sequence,entry.sequence)) entry={m.radar,m.sequence,true}; return;
@@ -390,21 +534,33 @@ void Client::Receive(std::span<const uint8_t> bytes,uint8_t channel) {
             if(m.sender>=kMaxPlayers || channel!=1+m.sender || !players_[m.sender].active || players_[m.sender].epoch!=m.epoch) return;
             auto it=entities_.find(e.id); if(it==entities_.end()) return;
             if(e.generation!=it->second.state.generation || e.owner!=m.sender || e.ownerEpoch!=m.epoch || !Newer(m.sequence,it->second.sequence)) return;
-            it->second={e,m.sequence,NowMs()-m.sampleAgeMs}; return;
+            it->second={e,m.sequence,clock_.LocalTime(m.sampleTimeMs,NowMs(),m.sampleAgeMs)}; return;
         }
         if(channel || m.sender!=kNoPlayer || m.epoch || !e.id) { Fail("Invalid entity control"); return; }
         if(m.kind==Kind::EntityRemove) { auto it=entities_.find(e.id); if(it!=entities_.end() && it->second.state.generation==e.generation) entities_.erase(it); return; }
         if(e.owner>=kMaxPlayers || !players_[e.owner].active || e.ownerEpoch!=players_[e.owner].epoch) return;
         auto it=entities_.find(e.id);
-        if(it!=entities_.end() && e.generation<it->second.state.generation) return;
+        if(it!=entities_.end() && e.generation<=it->second.state.generation) return;
         if(it==entities_.end() && entities_.size()>=kMaxEntities) { Fail("Entity limit exceeded"); return; }
         entities_[e.id]={e,0,NowMs()}; return;
     }
-    if (m.kind==Kind::Hit || m.kind==Kind::Shot || m.kind==Kind::Explosion || m.kind==Kind::EntityHit || m.kind==Kind::VehicleContact) {
+    if(m.kind==Kind::PickupState || m.kind==Kind::PickupGrant) {
+        if(status_!=Connection::Online || channel || m.sender!=kNoPlayer || m.epoch) return;
+        if(m.kind==Kind::PickupGrant) {
+            if(m.pickup.takenBy==self_ && m.hit.targetEpoch==players_[self_].epoch) events_.push_back({NowMs(),m});return;
+        }
+        if(m.pickup.status==3) {pickups_.erase(m.pickup.id);return;}
+        auto it=pickups_.find(m.pickup.id);
+        if(it==pickups_.end() && pickups_.size()>=kMaxPickups) {Fail("Pickup limit exceeded");return;}
+        if(it==pickups_.end() || Newer(m.pickup.revision,it->second.revision)) pickups_[m.pickup.id]=m.pickup;
+        return;
+    }
+    if (m.kind==Kind::Hit || m.kind==Kind::Shot || m.kind==Kind::Explosion || m.kind==Kind::EntityHit || m.kind==Kind::VehicleContact || m.kind==Kind::Crime) {
         if (status_!=Connection::Online || channel!=0 || m.sender>=kMaxPlayers) { Fail("Invalid event sender"); return; }
         const auto& p=players_[m.sender];
         if (!p.active || p.epoch!=m.epoch) return;
         if (m.kind==Kind::Hit && (m.hit.target!=self_ || m.hit.targetEpoch!=players_[self_].epoch)) return;
+        if(m.kind==Kind::Crime && (m.crime.target!=self_ || m.crime.epoch!=players_[self_].epoch)) return;
         if (events_.size()>=8192) { Fail("Game event queue overflow"); return; }
         events_.push_back({NowMs(),m}); return;
     }
@@ -419,7 +575,7 @@ void Client::Receive(std::span<const uint8_t> bytes,uint8_t channel) {
         auto& p=players_[m.sender];
         // State channels can arrive before the reliable roster. Discard until the roster is known.
         if (!p.active || m.epoch!=p.epoch || (p.hasState && !Newer(m.sequence,p.sequence))) return;
-        p.hasState=true; p.sequence=m.sequence; p.state=m.state; p.received=NowMs(); return;
+        p.hasState=true; p.sequence=m.sequence; p.state=m.state; p.received=clock_.LocalTime(m.sampleTimeMs,NowMs(),m.sampleAgeMs); return;
     }
     if (channel!=0 || m.sender!=kNoPlayer || (m.kind!=Kind::Joined && m.epoch!=0)) { Fail("Invalid control packet"); return; }
     if (m.kind==Kind::Rejected) {
@@ -431,7 +587,7 @@ void Client::Receive(std::span<const uint8_t> bytes,uint8_t channel) {
     }
     if (status_!=Connection::Online) { Fail("Unexpected server message"); return; }
     if (m.kind==Kind::Joined) { auto& p=players_[m.id]; if (!p.active || p.epoch!=m.epoch) { p={}; p.generation=++generation_; } p.active=true; p.name=m.name; p.epoch=m.epoch; }
-    else if (m.kind==Kind::Left) { players_[m.id]={}; if(host_!=m.host) { radar_={}; hasMission_=false; mission_={}; missionSequence_=0; } host_=m.host; }
+    else if (m.kind==Kind::Left) { players_[m.id]={}; if(host_!=m.host) { environment_={};hasEnvironment_=false;environmentSequence_=0;radar_={}; hasMission_=false; mission_={}; missionSequence_=0; } host_=m.host; }
     else Fail("Unexpected server message");
 }
 void Client::Poll() {
@@ -440,6 +596,7 @@ void Client::Poll() {
     while (socket_ && count++<128 && enet_host_service(socket_,&event,0)>0) {
         switch (event.type) {
             case ENET_EVENT_TYPE_CONNECT: {
+                ConfigurePeer(server_);
                 Message m; m.kind=Kind::Hello; m.name=name_; SendPacket(server_,m); status_=Connection::Handshake; break;
             }
             case ENET_EVENT_TYPE_RECEIVE: {
@@ -453,12 +610,18 @@ void Client::Poll() {
         }
     }
     if (socket_ && status_!=Connection::Online && NowMs()>deadline_) Fail("Connection timed out");
+    if(status_==Connection::Online && NowMs()-clockAt_>=(clock_.Samples()<4?250:2000)) {
+        Message request;request.kind=Kind::ClockRequest;request.sequence=++clockSequence_;request.clockClientMs=NowMs();
+        if(SendPacket(server_,request,kClockChannel,false)) {
+            clockPending_[request.sequence]=request.clockClientMs;while(clockPending_.size()>8) clockPending_.erase(clockPending_.begin());clockAt_=request.clockClientMs;
+        }
+    }
     if (socket_) enet_host_flush(socket_);
 }
-bool Client::SendState(const PlayerState& state) {
-    if (status_!=Connection::Online || !ValidState(state)) return false;
+bool Client::SendState(const PlayerState& state,uint16_t sampleAgeMs) {
+    if (status_!=Connection::Online || !ValidState(state) || sampleAgeMs>250) return false;
     const bool reliable=NeedsTransition(state);
-    Message m; m.kind=reliable ? Kind::Transition:Kind::State; m.sequence=++sequence_; m.state=state;
+    Message m; m.kind=reliable ? Kind::Transition:Kind::State; m.sequence=++sequence_; m.state=state;m.sampleAgeMs=sampleAgeMs;m.sampleTimeMs=clock_.ServerTime(NowMs()-sampleAgeMs);
     if(!SendPacket(server_,m,reliable ? 0:1,reliable)) return false;
     published_=state; hasPublished_=true;
     // The server broadcasts to other peers. Keep our own published state in
@@ -471,18 +634,18 @@ bool Client::SendChat(const std::string& text) {
     Message m; m.kind=Kind::Chat; m.text=text; return SendPacket(server_,m);
 }
 bool Client::SendEvent(const Message& event) {
-    if (status_!=Connection::Online || (event.kind!=Kind::Hit && event.kind!=Kind::Shot && event.kind!=Kind::Explosion && event.kind!=Kind::EntityHit && event.kind!=Kind::VehicleContact && event.kind!=Kind::MissionState && event.kind!=Kind::MissionCommand && event.kind!=Kind::MissionBarrier && event.kind!=Kind::MissionReady && event.kind!=Kind::MissionVote && event.kind!=Kind::Radar)
+    if (status_!=Connection::Online || (event.kind!=Kind::PickupCreate && event.kind!=Kind::PickupRequest && event.kind!=Kind::PickupRemove && event.kind!=Kind::Crime && event.kind!=Kind::Environment && event.kind!=Kind::Hit && event.kind!=Kind::Shot && event.kind!=Kind::Explosion && event.kind!=Kind::EntityHit && event.kind!=Kind::VehicleContact && event.kind!=Kind::MissionState && event.kind!=Kind::MissionCommand && event.kind!=Kind::MissionBarrier && event.kind!=Kind::MissionReady && event.kind!=Kind::MissionVote && event.kind!=Kind::Radar)
         || (event.kind==Kind::Hit && !ValidHit(event.hit)) || (event.kind==Kind::Shot && !ValidShot(event.shot))) return false;
-    auto m=event; m.sender=kNoPlayer; m.epoch=0; Message parsed;
+    auto m=event; m.sender=kNoPlayer; m.epoch=0;if(m.kind==Kind::Environment) {if(self_!=host_) return false;m.sequence=++sequence_;} Message parsed;
     if(!Decode(Encode(m),parsed)) return false;
-    return SendPacket(server_,m);
+    return SendPacket(server_,m,m.kind==Kind::Environment?1:0,m.kind!=Kind::Environment);
 }
 bool Client::SendEntity(const Message& event) {
     if(status_!=Connection::Online || ((event.kind<Kind::EntityCreate || event.kind>Kind::EntityClaim) && event.kind!=Kind::SeatRequest)) return false;
     if((event.kind==Kind::EntityCreate || event.kind==Kind::EntityUpdate) && !ValidEntity(event.entity)) return false;
     if(event.sampleAgeMs>250) return false;
     auto m=event; m.sender=kNoPlayer; m.epoch=0;
-    const bool update=m.kind==Kind::EntityUpdate; if(update) m.sequence=++sequence_;
+    const bool update=m.kind==Kind::EntityUpdate; if(update) {m.sequence=++sequence_;m.sampleTimeMs=clock_.ServerTime(NowMs()-m.sampleAgeMs);}
     if(!SendPacket(server_,m,update ? 1 : 0,!update)) return false;
     if(update) {
         auto it=entities_.find(m.entity.id);

@@ -963,7 +963,7 @@ void CGame::Process(void)
 		{
 			PUSH_MEMID(MEMID_CARS);
 			if (processTime < 2 && vccoop::PopulationOwner())
-				CCarCtrl::GenerateRandomCars();
+				{vccoop::NpcPlayerScope policeContext(vccoop::PopulationTarget(),vccoop::PopulationTarget());CCarCtrl::GenerateRandomCars();}
 			if (vccoop::PopulationOwner()) CRoadBlocks::GenerateRoadBlocks();
 			CCarCtrl::RemoveDistantCars();
 			CCarCtrl::RemoveCarsIfThePoolGetsFull();

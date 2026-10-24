@@ -43,24 +43,26 @@ inline float WheelPhase(float a,float b,float omega,float span,float t) {
     return std::remainder(a+(delta+std::round((omega*span-delta)/tau)*tau)*t,tau);
 }
 class WorldInterpolator {
-    struct Sample { double time; Entity state; };
-    std::deque<Sample> samples_;
+    SnapshotBuffer<Entity> samples_;
     Interpolator ped_;
 public:
     void Clear() { samples_.clear(); ped_.Clear(); }
-    void Push(double time,const Entity& e) {
+    double Delay() const {return samples_.Delay();}
+    void Push(double time,const Entity& e,double arrival=0) {
         if(!samples_.empty()) {
+            if(time<=samples_.back().time) return;
             const auto& last=samples_.back(); const auto a=EntityPosition(last.state),b=EntityPosition(e);
             const auto dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;
-            if(time<last.time || last.state.generation!=e.generation || last.state.area!=e.area || dx*dx+dy*dy+dz*dz>625) Clear();
+            if(last.state.generation!=e.generation || last.state.area!=e.area || dx*dx+dy*dy+dz*dz>625) Clear();
         }
-        samples_.push_back({time,e}); while(samples_.size()>32) samples_.pop_front();
-        if(e.kind==EntityKind::Ped) ped_.Push(time,e.ped);
+        samples_.Push(time,e,arrival);
+        if(e.kind==EntityKind::Ped) ped_.Push(time,e.ped,arrival);
     }
     Entity At(double time) const {
         if(samples_.empty()) return {};
         auto result=samples_.back().state;
         if(result.kind==EntityKind::Ped) { result.ped=ped_.At(time); return result; }
+        time=samples_.Playout(time);
         auto matrix=[](Entity& e)->Transform&{return e.kind==EntityKind::Vehicle ? e.vehicle.transform : e.object.transform;};
         if(time<=samples_.front().time) return samples_.front().state;
         for(size_t i=1;i<samples_.size();++i) if(time<=samples_[i].time) {
@@ -69,6 +71,8 @@ public:
             result=t<1 ? a : b; matrix(result)=BlendTransform(matrix(a),matrix(b),t);
             if(result.kind==EntityKind::Vehicle) {
                 auto& v=result.vehicle; const auto& x=a.vehicle; const auto& y=b.vehicle;
+                v.rotor=WheelPhase(x.rotor,y.rotor,14.4923f,float(samples_[i].time-samples_[i-1].time),t);
+                v.searchX=std::lerp(x.searchX,y.searchX,t);v.searchY=std::lerp(x.searchY,y.searchY,t);v.searchIntensity=std::lerp(x.searchIntensity,y.searchIntensity,t);
                 v.steer=std::lerp(x.steer,y.steer,t); v.wheelSteer=std::lerp(x.wheelSteer,y.wheelSteer,t);v.bikeLean=std::lerp(x.bikeLean,y.bikeLean,t);
                 for(size_t w=0;w<4;++w) {
                     v.wheelOmega[w]=std::lerp(x.wheelOmega[w],y.wheelOmega[w],t);

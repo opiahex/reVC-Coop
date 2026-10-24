@@ -22,6 +22,7 @@ public:
     void End();
     void Rect(float x,float y,float w,float h,uint32_t color);
     void Image(void* texture,float x,float y,float w,float h,uint32_t color=0xFFFFFFFF);
+    void ImageRegion(void* texture,float x,float y,float w,float h,float u0,float v0,float u1,float v1,uint32_t color);
     void RoundRect(float x,float y,float w,float h,uint32_t color,float radius=7);
     void Triangle(float x1,float y1,float x2,float y2,float x3,float y3,uint32_t color);
     void RectOutline(float x,float y,float w,float h,uint32_t color,float t=1);

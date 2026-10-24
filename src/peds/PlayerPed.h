@@ -57,7 +57,7 @@ public:
 	static bool bDebugPlayerInfo;
 #endif
 
-	CPlayerPed();
+	explicit CPlayerPed(ePedType type=PEDTYPE_PLAYER1);
 	~CPlayerPed();
 	void SetMoveAnim() { };
 

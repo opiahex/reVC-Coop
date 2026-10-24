@@ -9,6 +9,7 @@ struct PlayerIndicator {
     uint8_t weapon{};
     void* weaponIcon{};
     std::string name;
+    uint8_t wanted{};void* wantedIcon{};
 };
 inline std::wstring PlainBubble(std::string_view text) {
     // Chat colour markup is not interpreted inside speech bubbles.

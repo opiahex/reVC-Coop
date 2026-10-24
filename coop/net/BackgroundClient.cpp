@@ -55,7 +55,7 @@ void BackgroundClient::PublishEntities(std::vector<Entity> entities) {
 }
 void BackgroundClient::Run() {
     Client client;
-    uint64_t revision=0,lastSend=0,lastEntitySend=0;
+    uint64_t revision=0,lastSend=0,lastEntitySend=0,entityRound=0;
     std::map<uint32_t,uint64_t> entitySent;std::map<uint32_t,uint8_t> objectFlags;
     while (!stopping_) {
         Command command; PlayerState local; uint64_t sampled,entitySampled; std::deque<std::string> outgoing; std::deque<Message> outgoingEvents; std::vector<Entity> entities;
@@ -73,7 +73,7 @@ void BackgroundClient::Run() {
                 local.velocity={}; local.move=1;
                 for(size_t i=0;i<local.animationCount;++i) local.animations[i].flags&=uint16_t(~1u);
             }
-            client.SendState(local); lastSend=now;
+            client.SendState(local,uint16_t(std::min<uint64_t>(now-sampled,250))); lastSend=now;
         }
         for (const auto& event:outgoingEvents) {
             if((event.kind>=Kind::EntityCreate && event.kind<=Kind::EntityClaim) || event.kind==Kind::SeatRequest) client.SendEntity(event);
@@ -83,18 +83,21 @@ void BackgroundClient::Run() {
             std::set<uint32_t> occupied;
             if(local.vehicle) occupied.insert(local.vehicle);
             for(auto& player:client.Players()) if(player.active && player.hasState && player.state.vehicle) occupied.insert(player.state.vehicle);
+            // Vary packet order so deterministic transport loss never selects
+            // the same NPCs from an otherwise identical batch on every tick.
+            if(!entities.empty()) std::rotate(entities.begin(),entities.begin()+size_t(entityRound++%entities.size()),entities.end());
             for(auto& e:entities) {
                 uint64_t period=50; // moving population at 20 Hz; human-driven vehicles at 30 Hz
                 if(e.kind==EntityKind::Vehicle && occupied.contains(e.id)) period=33;
                 if(e.kind==EntityKind::Object && !(e.object.flags&64)) {
-                    auto v=e.object.transform.velocity;period=v.x*v.x+v.y*v.y+v.z*v.z<.01f?500:50;
+                    auto v=e.object.transform.velocity,w=e.object.turn;period=v.x*v.x+v.y*v.y+v.z*v.z+w.x*w.x+w.y*w.y+w.z*w.z<.01f?500:50;
                 }
                 if(e.kind==EntityKind::Object && (!objectFlags.contains(e.id) || objectFlags[e.id]!=e.object.flags)) period=0;
                 if(now-entitySent[e.id]<period) continue;
                 auto known=client.Entities().find(e.id);
                 if(known==client.Entities().end() || known->second.state.generation!=e.generation || known->second.state.owner!=client.Self()) continue;
                 if(now-entitySampled>250) {
-                    e.vehicle.transform.velocity={}; e.vehicle.turn={}; e.vehicle.wheelOmega={}; e.object.transform.velocity={}; e.ped.velocity={};
+                    e.vehicle.transform.velocity={}; e.vehicle.turn={}; e.vehicle.wheelOmega={}; e.object.transform.velocity={};e.object.turn={}; e.ped.velocity={};
                     for(size_t i=0;i<e.ped.animationCount;++i) e.ped.animations[i].flags&=uint16_t(~1u);
                 }
                 Message update; update.kind=Kind::EntityUpdate; update.entity=e;update.sampleAgeMs=uint16_t(std::min<uint64_t>(now-entitySampled,250));if(client.SendEntity(update)) {entitySent[e.id]=now;if(e.kind==EntityKind::Object) objectFlags[e.id]=e.object.flags;}
@@ -106,9 +109,11 @@ void BackgroundClient::Run() {
             // A queued disconnect/reconnect must not publish the old session again.
             if (command_.revision==revision) {
                 snapshot_.status=client.Status(); snapshot_.self=client.Self(); snapshot_.host=client.Host(); snapshot_.populationMask=client.PopulationMask();
+                snapshot_.transport=client.Transport();snapshot_.environment=client.EnvironmentState();snapshot_.hasEnvironment=client.HasEnvironment();
+                snapshot_.clockReady=client.Clock().Ready();snapshot_.clockSamples=client.Clock().Samples();snapshot_.clockRtt=client.Clock().Rtt();snapshot_.clockOffset=client.Clock().Offset();
                 snapshot_.players=client.Players(); snapshot_.error=client.Error();
                 snapshot_.chats=client.Chats();
-                snapshot_.entities=client.Entities();
+                snapshot_.entities=client.Entities();snapshot_.pickups=client.Pickups();
                 snapshot_.radar=client.Radar(); snapshot_.mission=client.Mission(); snapshot_.vote=client.Vote(); snapshot_.hasMission=client.HasMission();
                 auto events=client.TakeEvents();
                 if (events.size()+incomingEvents_.size()>8192) {

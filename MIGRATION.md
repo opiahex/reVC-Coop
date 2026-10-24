@@ -321,3 +321,274 @@ Legacy upstream workflow definitions remain available by manual dispatch only:
 their premake/platform matrices do not build the native cooperative target. The
 tested CMake build is documented in docs/BUILDING.md; the README's check badge
 records local subsystem results and does not claim a completed GitHub CI run.
+
+
+## Native 0.2.3–0.2.4: object identity, environment and simulation timing
+
+Protocol 17 adds synchronized source timestamps, clock exchanges on a separate
+unreliable channel, complete weather snapshots, object angular motion and native
+animation clip durations. This is incompatible with the previously published
+protocol 15 build: both peers and a standalone server must use the same build.
+
+Weapon setup now waits for both native weapon models and their animation/TXD
+dependencies before GiveWeapon or SetCurrentWeapon. A fresh native crash stack
+was inside BlendAnimation during SetAttack with an unprepared weapon animation
+group. Cold-start firing tests exercised the pistol, shotgun and rifle in both
+processes without reproducing that crash. This fixes resource preparation rather
+than hiding a failed animation lookup inside the engine.
+
+Map props bind by model and original map placement, including CDummyObject.
+CPopulation's named conversion path replaces that exact dummy; a missing map
+instance is awaited rather than cloned. Tracked originals cannot be reclaimed by
+population conversion while their network records are alive. The server also
+coalesces duplicate registrations of the same non-mission map instance. Falling
+objects include angular motion in the moving-update policy. Native diagnostics
+count real/dummy instances at each original placement. Sixteen initial props in
+the two native processes each had one real instance and no remaining dummy.
+Guest damage and a native impulse on a lamppost reproduced the damaged/moving
+state on both peers; a sampled position difference after the impulse was 0.0033 m.
+The finite 64-prop/192-entity limits remain; this is not a city-wide persistent
+campaign destruction ledger, nor does it replay every decorative debris particle.
+
+Weather progression is owned by the host. Guests apply the actual blend, rain,
+wind, wet roads, clouds/fog/sun/rainbow/glare, traffic-light brightness, script rain
+and lightning state before rendering, while retaining camera-local rain/heat
+particles and sound emission. Cached weather follows the reliable join roster;
+regular snapshots are replaceable unreliable messages. Native tests switched all
+six weather modes and a sunny-to-rain transition in both processes. Thunder
+scheduling is implemented but has not had a separate audible native acceptance
+check.
+
+Four monotonic timestamps map sample capture time onto the server timeline;
+producer staging and network travel are no longer mistaken for fresh arrival.
+The estimator excludes server processing, prefers recent low-queue exchanges,
+slews corrections, checks echoed pending requests and resets on reconnect.
+Entity creates from the same generation cannot overwrite newer moving state.
+Background traffic uses sampled interpolation; human-driven vehicle collision
+poses retain bounded current-time prediction. Actual animation duration and
+measured native phase speed replace the approximation at repeating gait boundaries.
+
+Cooperative gameplay now advances at the original 30 Hz simulation cadence,
+independently of the configurable render cap. Fixed timer advances preserve time
+scale/pause and fractional milliseconds; bounded catch-up prevents a long stall
+from causing an unlimited burst of physics steps. Owned physical transforms and
+the camera interpolate only for drawing and are restored before simulation.
+Camera interpolation accounts for its reflected Left/Forward/Up basis. Scaled
+or invalid bases and teleports bypass rigid interpolation. Replicas refresh at
+render cadence without publishing interpolated transforms back into physics.
+
+Two real processes were measured at render caps 30, 60, 144 and 240. Simulation
+remained approximately 30 Hz; the last cap achieved about 192 FPS on this PC.
+The same three-second native pad-driven run at 30, 60 and 144 FPS ended at exactly
+the same recorded coordinates, travelling 16.506 m in each trial. Default drawing
+remains 60 FPS. These results do not establish compatibility of every render-side
+effect or a complete campaign at arbitrary render rates.
+
+Diagnostics also exposed intermittent multi-second population sample starvation
+on localhost. ENet's stock RTT-based unreliable throttle was observed at 0/32
+on a server peer, and at 16–24/32 on the source, despite small current RTT and no
+outgoing backlog. Peer configuration now measures its RTT minimum over one second,
+uses 100 ms acknowledgement probes and faster throttle recovery, retaining ENet's
+congestion throttle. Entity send order rotates to avoid deterministic loss
+repeatedly selecting the same NPCs. Transport throttle/RTT/queue counters are copied
+from the owning network worker into diagnostics; engine access stays on the game
+thread. Native stress results are retained outside the source tree, including
+failed runs and the untuned 40±15 ms per-direction / 1% loss run; that run still
+showed metre-scale corrections and is not evidence of completed WAN support.
+
+Development scene/player placement and test cars now require native ground,
+clearance and world checks. Rejected destinations do not unload the current
+scene. Test controls expire and test scripts restore input/network configuration;
+the private task plan and captures remain outside the repository.
+
+
+Final local acceptance for 0.2.4: the engine build and all 265 portable/live-UDP/
+Unicode-D3D9 checks passed. Two cold population traces after throttle tuning had
+maximum observed NPC/traffic source ages of 125 ms and 105 ms, with source
+throttle at 32/32 throughout their sampled windows. The two 12-second runs are
+bounded acceptance evidence, not a guarantee for all connections. Initial spawn
+can still briefly precede binding an NPC occupant. A final two-process native
+run repeated all six weather modes, the blended transition, guest prop damage
+and a falling original, firing both pistols, ordinary passenger entry and
+forward/reverse attachment. Ordinary exits succeeded after the test vehicle was
+parked; the earlier attempt while still reversing was correctly refused by the
+native game and was not counted as a successful exit.
+
+Damage reconstruction now calls the native load/rebuild path without generating
+flying components again. Repeated bonnet/boot/door state changes left the guest's
+temporary-object count at 0 rather than duplicating old parts. Native save-load
+callers retain the original default behaviour. Windscreen visibility is rebuilt
+without repeated particle effects. Detached vehicle debris still needs explicit
+network entities/events for matched trajectories/collisions; suppressing duplicate
+local spawns is not presented as completed debris synchronization. Exited players
+also stop publishing the engine's cached last-vehicle pointer as current occupancy.
+
+## Native 0.2.5: SA-Coop snapshot playback and rendered poses
+
+The previous coordinate/UDP checks did not establish correct animation or effect
+attachment. Subsequent user reports of jerking NPCs, rotating torsos and detached
+headlight effects remained valid issues after the 0.2.4 acceptance runs.
+
+Adapted the sender-timed snapshot buffer from Karimov-Akbar/sa-coop:
+https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/shared/lib/sync/SnapshotBuffer.h
+The read-only local reference's SHA-256 is
+`a43e0a3cb2dfa1a3834055ea9bf62dbac60241496ecec9b49ffae59035e6b9e6`.
+Copyright (c) 2026 Karimov-Akbar; MIT notice retained in
+`coop/vendor/sa-coop.LICENSE`. This is an adaptation of that buffer, not a claim
+that all SA-Coop gameplay systems have been transplanted. reVC's existing clock
+exchange already maps capture timestamps, so arrival jitter adjusts playback
+delay (100–180 ms) without changing sample spacing. Duplicate/older captures are
+discarded instead of clearing history, and increasing the jitter margin cannot
+play an entity backwards. Human-driven vehicle prediction also rejects old
+samples. Owner authority and collision handling retain their existing paths.
+
+The root rendering fault was independent of transport: the simulation-frame
+guard prevented NPC roots from being updated on intervening render frames.
+Replica roots now refresh every draw, on one shared frame timestamp, with
+vehicles positioned before their occupants. The fixed 30 Hz native simulation
+continues independently. Occupants of an interpolated owner vehicle receive its
+parent transform delta for rendering; the stateful seating routine is not called
+again and simulation matrices are restored afterwards.
+
+Snapshots now carry the evaluated local rotations/translations of 22 standard
+ped bones, including native IK, look-at and hit reactions. Rotation signs are
+handled by shortest-path quaternion interpolation. Signed 16-bit packing keeps
+a full NPC update with all six animation layers at 581 bytes; maximum accepted
+message size is 768 bytes, below the normal ENet MTU. Local bone translations
+have at most approximately 0.25 mm rounding error. Missing bones retain the
+animation fallback. Owned offscreen peds evaluate their skeleton and hierarchy
+before native IK so a guest's view does not depend on the owner's camera culling.
+Animation fallback retains native root-motion extraction and samples the actual
+evaluated phase; stripping the extraction flags previously added a repeating
+mesh offset on top of its synchronized world root.
+
+Car headlight coronas, including the additional front flares still fading after
+passing the camera, follow the rendered model-space attachment points. Previously
+the unrefreshed flares could remain at an earlier world position. A bounded
+development-only render trace records bone poses, matrix positions and corona
+attachment error; it is enabled only by the sandbox trace command.
+
+Verification: the engine and 280 portable/live-UDP/Unicode-D3D9 checks pass,
+including full-pose relay, malformed pose rejection, submillimetre packing,
+quaternion sign changes, late packets and jitter-buffer monotonicity. Two native
+processes were then tested with a 60 FPS host and 144 FPS guest: ambient walking,
+nearby gunfire, a guest-originated NPC damage request, ordinary driver/passenger
+entry, driving past a front camera, parking and ordinary exits. The final LAN
+trace contained 1,765 consecutive rendered NPC comparisons; 97.6% of the selected
+locomotion comparisons changed root position on the next draw. The sampled
+spine changed by at most 4.68 degrees between consecutive short render frames.
+All 178 measured car-headlight attachments had zero computed world-space offset
+from their model anchors. These are bounded scene measurements, not a claim of
+perfect synchronization of every animation or gameplay scenario.
+
+A further two-process run used an external UDP proxy adding 40±15 ms each way
+and 1% packet loss (5,844 forwarded / 55 deliberately dropped datagrams).
+Driver/passenger entry, attachment and exit completed without a crash; all 564
+measured headlight anchors remained coincident. Pose changes were less regular
+than on LAN (largest sampled spine change 21.8 degrees), so this does not close
+WAN smoothing or collision convergence. The proxy was stopped and the original
+direct port 7781 restored. Campaign progression/cutscenes and detached physical
+debris remain outside this verified scope. Private plans and test captures remain
+outside the repository; no roadmap or source changes were published in this run.
+Final installed binary SHA-256:
+`ca984b23a50c50c9b22448f3c52959a8ae20b336e9194c1a40f009513a718e99`
+matched the build and both game copies. A final rate sample measured approximately
+59.99/143.98 render Hz and 29.99/30.02 simulation Hz in host/guest respectively.
+Both were left connected outdoors with normal input, ready pistol resources,
+60 FPS limits restored, and no delay proxy running.
+
+## Native 0.2.7: guest AI perception, police and shared pickups
+
+The NPC visual snapshot work in 0.2.5 did not make guest actions part of native
+AI perception. Gunshot effects were replayed without the native gunshot event,
+and civilian proxy peds failed native IsPlayer checks. Guest-local wanted logic
+also spawned a private police helicopter. These were gameplay authority faults,
+not grounds to replace ENet.
+
+Remote participants now use passive CPlayerPed instances (with a separate
+CPlayerInfo and CWanted) allocated in the native ped pool. They remain replicas:
+local player input, camera and physics are not run for them. A main-thread RAII
+NPC context selects the actual aggressor/suspect for native AI without swapping
+CWorld player slots or camera/input state. Owned NPCs perceive native gunshot,
+aim and assault events before their AI step; replicas replay their owner's state.
+Damage reactions retain the real source player. Crosshair rays include the
+camera offset and use native line-of-sight and ped collision volumes.
+
+Crime reports validate suspect epoch/life and witness ownership/generation.
+Native wanted consequences go to the suspect's own game. Pending remote wanted
+levels initialize native pursuit limits immediately, so cops do not briefly
+choose civilian flight while waiting for a state round trip. Pursuit cleanup
+uses the same suspect context when removing a cop or disconnecting a player.
+The native HUD retains the local player's wanted level. Remote name tags render
+the wanted count using Vice City's own wanted glyph above the nickname.
+
+The session host now runs the native police-helicopter manager for the wanted
+participant. Its model request, pool entity, transforms, rotor and searchlight
+state are replicated. Guests do not run a second helicopter spawner. Native
+special-helicopter destruction remains under the native manager rather than the
+generic distance-retirement path, preserving its pHelis lifetime.
+
+Shared supplies use a server registry and stable pickup identities. Existing
+native originals are matched before creating replicas; NPC loot records its
+source entity and generation. Collection commits availability on the server
+before awarding exactly one player through native inventory/effect calls.
+Simultaneous claims, repeated revisions, old player lives and distant requests
+cannot award the same supply twice. Ammo-only extraction leaves the weapon
+available and synchronizes its empty-ammo appearance. Native street cooldowns
+run once for the session and wait for participants to leave the radius, including
+pickups whose native area is AREA_EVERYWHERE. Consumed temporary loot tombstones
+are retired; persistent consumed supplies remain in the late-join baseline.
+
+Read-only references consulted for this adaptation:
+
+- [SA-Coop StoryCoop.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/features/story/cooperative/StoryCoop.cpp): CooperativeStoryShot and owner-side AI events.
+- [SA-Coop Bullets.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/features/damage/Bullets.cpp): queued replay before processing.
+- [SA-Coop Damage.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/features/damage/Damage.cpp): owner damage reactions and wanted isolation.
+- [SA-Coop Pickups.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/features/pickups/Pickups.cpp): shared pickup identity, removal/cooldown and owner loot.
+- [SA-Coop Players.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/entities/player/Players.cpp): real player proxies, context and DrawWantedStars placement.
+- [SA-Coop Population.cpp](https://github.com/Karimov-Akbar/sa-coop/blob/main/src/client/features/population/Population.cpp): owner simulation and participant context.
+- [Parricidium/VCCoop combat.cpp](https://github.com/Parricidium/VCCoop/blob/main/src/combat.cpp): native ReactToAttack is a separate step from InflictDamage.
+
+SA-Coop's MIT notice is retained in coop/vendor/sa-coop.LICENSE. These are native
+reVC adaptations, with no copied binary addresses/detours. This section does not
+claim that every SA-Coop system has been ported. The wire protocol is now 20;
+0.2.7 participants must use matching builds.
+
+Verification: tools/build-coop.ps1 -Test built the native engine and passed
+390 portable/live-UDP/Unicode-D3D9 checks. Coverage includes action releases,
+aim/wanted wire validation, authority and stale-life rejection, concurrent
+collection, partial ammo, consumed late-join baselines, AREA_EVERYWHERE respawn
+radius handling and helicopter visual-state validation.
+
+Two actual native processes were tested. Actual guest aim/fire input made three
+owned civilians react and flee from the guest; all three replicas followed the
+native fleeing state. Explicit damage fixtures separately checked source
+attribution and native death/loot, rather than being counted as normal gunfire.
+Money awarded +75 only to the guest; health 55 to 100, armour 25 to 100, pistol
+ammo +40, and automatic shotgun-slot extraction +20 each applied once. The latter
+kept the selected shotgun and left the SPAS pickup visible with zero ammo in both
+games. A simultaneous native money collection awarded one total +101 reward.
+Corpse money appeared under the same pickup ID in both processes. A real 30-second
+street cooldown stayed hidden while the guest stood nearby, then became visible
+in both games after both participants left its radius.
+
+An explicit guest hit on a native cop caused pursuit of player 1, guest wanted 2
+and host wanted 0. Native cop gunfire subsequently reduced the guest's armour.
+The final build repeated the pursuit and cop-removal test and cleared that cop
+from the guest pursuit list. At guest wanted 3, both games registered the same
+police helicopter (network ID 79 in the final run). The rendered host capture
+showed three native wanted badges above Guest while the host HUD remained at 0.
+A previous run also observed shared helicopter removal after clearing wanted.
+
+These are bounded sandbox tests. Campaign scripts/cutscenes/progress remain
+unported. Shop/property/save/revenue pickups, mines and floating mission packages
+are outside the verified shared-supplies path. Arrest handoff, full helicopter
+combat/shootdown, all six wanted tiers, reconnect during pickup awards and WAN
+police convergence still need dedicated native acceptance tests. None is claimed
+complete by the portable suite. Existing collision/WAN smoothing limits remain.
+
+Final installed binary SHA-256:
+`7642116d9f901a004f8c182159a510c0aa4d6389ad01831f9616e17113055306`
+matched the build and both test game copies. Both games used direct port 7781,
+with normal input and 60 FPS limits restored after testing.
+Local test scripts, captures and the private roadmap are excluded from commits.

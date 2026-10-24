@@ -1,5 +1,6 @@
 #include "coop/Coop.h"
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "main.h"
 #include "Lights.h"
@@ -789,6 +790,9 @@ CObject::Init(void)
 bool
 CObject::CanBeDeleted(void)
 {
+	// The network record owns this lifetime, including authoritative originals.
+	// Population conversion must not silently resurrect a broken map prop.
+	if (vccoop::TrackedObject(this)) return false;
 	switch (ObjectCreatedBy) {
 		case GAME_OBJECT:
 			return true;

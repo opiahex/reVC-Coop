@@ -25,6 +25,7 @@ class VehicleMotion {
 public:
     void Clear() {known_=false;correction_={};}
     void Push(double received,const Entity& next,double now) {
+        if(known_ && latest_.generation==next.generation && received<=received_) return;
         Vec3 error{};
         if(known_ && latest_.generation==next.generation && latest_.area==next.area && now-received_<.25) {
             auto before=At(now).vehicle.transform.position,after=PredictVehicle(next,now-received).vehicle.transform.position;

@@ -1,5 +1,6 @@
 #pragma once
 #include "Protocol.h"
+#include "SnapshotBuffer.h"
 #include <algorithm>
 #include <deque>
 #include <numbers>
@@ -18,23 +19,25 @@ inline Quaternion BlendQuaternion(Quaternion a,Quaternion b,float t) {
     return length>.00001f ? Quaternion{q.x/length,q.y/length,q.z/length,q.w/length} : Quaternion{};
 }
 class Interpolator {
-    struct Sample { double time; PlayerState state; };
-    std::deque<Sample> samples_;
+    SnapshotBuffer<PlayerState> samples_;
 public:
     void Clear() { samples_.clear(); }
     bool Empty() const { return samples_.empty(); }
-    void Push(double time, const PlayerState& s) {
+    double Delay() const {return samples_.Delay();}
+    void Push(double time, const PlayerState& s,double arrival=0) {
         if (!samples_.empty()) {
+            if(time<=samples_.back().time) return;
             const auto& p=samples_.back().state.position;
             float dx=p.x-s.position.x,dy=p.y-s.position.y,dz=p.z-s.position.z;
             const auto& last=samples_.back().state;
-            if (time<samples_.back().time || last.area!=s.area || last.life!=s.life || last.vehicle!=s.vehicle
+            if (last.area!=s.area || last.life!=s.life || last.vehicle!=s.vehicle
                 || ((last.flags^s.flags)&kInVehicle) || dx*dx+dy*dy+dz*dz>625) Clear();
         }
-        samples_.push_back({time,s}); while (samples_.size()>32) samples_.pop_front();
+        samples_.Push(time,s,arrival);
     }
     PlayerState At(double time) const {
         if (samples_.empty()) return {};
+        time=samples_.Playout(time);
         if (time<=samples_.front().time) return samples_.front().state;
         for (size_t i=1;i<samples_.size();++i) {
             if (time>samples_[i].time) continue;
@@ -43,16 +46,24 @@ public:
             auto s=t<1 ? a.state : b.state;
             s.position={std::lerp(a.state.position.x,b.state.position.x,t),std::lerp(a.state.position.y,b.state.position.y,t),std::lerp(a.state.position.z,b.state.position.z,t)};
             s.heading=AngleLerp(a.state.heading,b.state.heading,t);
-            for(size_t j=0;j<s.bones.size();++j) if((a.state.boneMask&b.state.boneMask)&(1u<<j))
+            for(size_t j=0;j<s.bones.size();++j) if((a.state.boneMask&b.state.boneMask)&(1u<<j)) {
                 s.bones[j]=BlendQuaternion(a.state.bones[j],b.state.bones[j],t);
+                const auto x=a.state.bonePositions[j],y=b.state.bonePositions[j];
+                s.bonePositions[j]={std::lerp(x.x,y.x,t),std::lerp(x.y,y.y,t),std::lerp(x.z,y.z,t)};
+            }
             for (size_t j=0;j<s.animationCount && t<1;++j) {
                 auto& anim=s.animations[j]; bool matched=false;
                 for (size_t k=0;k<b.state.animationCount;++k) {
                     const auto& next=b.state.animations[k];
                     if (anim.group!=next.group || anim.id!=next.id) continue;
-                    // Loop/restart boundaries must not run the animation backwards.
-                    anim.time=next.time>=anim.time && next.time-anim.time<.5f
-                        ? std::lerp(anim.time,next.time,t) : anim.time+float(time-a.time)*anim.speed;
+                    // Unwrap by the actual clip duration and measured phase rate.
+                    // Movement associations don't necessarily advance at `speed`.
+                    float delta=next.time-anim.time;
+                    if((anim.flags&2) && anim.duration>0 && next.duration==anim.duration) {
+                        float expected=(anim.speed+next.speed)*.5f*float(b.time-a.time);
+                        delta+=std::round((expected-delta)/anim.duration)*anim.duration;
+                        anim.time+=delta*t;
+                    } else anim.time=delta>=0 && delta<.5f ? std::lerp(anim.time,next.time,t) : anim.time+float(time-a.time)*anim.speed;
                     anim.blend=std::lerp(anim.blend,next.blend,t); matched=true; break;
                 }
                 if (!matched && (anim.flags&1)) anim.time+=float(time-a.time)*anim.speed;

@@ -47,6 +47,13 @@ class CCoronas
 {
 	static CRegisteredCorona aCoronas[NUMCORONAS];
 public:
+	static const CRegisteredCorona* Find(uint32 id) {
+		for(const auto& corona:aCoronas) if(corona.id==id) return &corona;
+		return nil;
+	}
+	static void Move(uint32 id,const CVector& position) {
+		for(auto& corona:aCoronas) if(corona.id==id) {corona.coors=position;return;}
+	}
 	enum {
 		SUN_CORE = 1,
 		SUN_CORONA

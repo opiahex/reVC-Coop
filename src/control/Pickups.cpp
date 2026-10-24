@@ -1,4 +1,5 @@
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "main.h"
 
@@ -149,6 +150,7 @@ ModifyStringLabelForControlSetting(char *str)
 void
 CPickup::ExtractAmmoFromPickup(CPlayerPed *player)
 {
+    if(!vccoop::CollectPickup(this,true)) return;
 	eWeaponType weaponType = CPickups::WeaponForModel(m_pObject->GetModelIndex());
 	
 	if (m_eType == PICKUP_IN_SHOP || !CWeaponInfo::IsWeaponSlotAmmoMergeable(CWeaponInfo::GetWeaponInfo(weaponType)->m_nWeaponSlot))
@@ -171,6 +173,7 @@ removeAmmo:
 void
 CPickup::Remove()
 {
+    vccoop::PickupRemoving(this);
 	GetRidOfObjects();
 	m_bRemoved = true;
 	m_eType = PICKUP_NONE;
@@ -291,7 +294,7 @@ CPickup::CanBePickedUp(CPlayerPed *player, int playerId)
 }
 
 bool
-CPickup::Update(CPlayerPed *player, CVehicle *vehicle, int playerId)
+CPickup::Update(CPlayerPed *player, CVehicle *vehicle, int playerId,bool networkGrant)
 {
 	bool result = false;
 	float waterLevel;
@@ -314,6 +317,7 @@ CPickup::Update(CPlayerPed *player, CVehicle *vehicle, int playerId)
 	}
 
 	if (m_bRemoved) {
+        if(vccoop::ManagedPickup(this)) return false;
 		if (CTimer::GetTimeInMilliseconds() > m_nTimer) {
 			// respawn pickup if we're far enough
 			float dist = (FindPlayerCoors().x - m_vecPos.x) * (FindPlayerCoors().x - m_vecPos.x) + (FindPlayerCoors().y - m_vecPos.y) * (FindPlayerCoors().y - m_vecPos.y);
@@ -365,7 +369,7 @@ CPickup::Update(CPlayerPed *player, CVehicle *vehicle, int playerId)
 			}
 		}
 
-		if (isPickupTouched) {
+		if (isPickupTouched && !networkGrant) {
 			eWeaponType weaponType = CPickups::WeaponForModel(m_pObject->GetModelIndex());
 			if (weaponType < WEAPONTYPE_TOTALWEAPONS && CDarkel::FrenzyOnGoing()) {
 				isPickupTouched = false;
@@ -419,7 +423,8 @@ CPickup::Update(CPlayerPed *player, CVehicle *vehicle, int playerId)
 			m_bWasControlMessageShown = false;
 
 		// if we didn't then we've got nothing to do
-		if (isPickupTouched && CanBePickedUp(player, playerId)) {
+		if ((isPickupTouched || networkGrant) && (networkGrant || CanBePickedUp(player, playerId))) {
+            if(!networkGrant && !vccoop::CollectPickup(this)) return false;
 			if (m_pObject->GetModelIndex() != MI_PICKUP_PROPERTY && m_pObject->GetModelIndex() != MI_PICKUP_PROPERTY_FORSALE)
 				CPad::GetPad(0)->StartShake(120, 100);
 
@@ -648,7 +653,7 @@ CPickup::Update(CPlayerPed *player, CVehicle *vehicle, int playerId)
 		}
 	}
 
-	if (!m_bRemoved && (m_eType == PICKUP_ONCE_TIMEOUT || m_eType == PICKUP_ONCE_TIMEOUT_SLOW || m_eType == PICKUP_MONEY) && CTimer::GetTimeInMilliseconds() > m_nTimer)
+	if (!vccoop::ManagedPickup(this) && !m_bRemoved && (m_eType == PICKUP_ONCE_TIMEOUT || m_eType == PICKUP_ONCE_TIMEOUT_SLOW || m_eType == PICKUP_MONEY) && CTimer::GetTimeInMilliseconds() > m_nTimer)
 		Remove();
 	
 	return result;
@@ -717,6 +722,7 @@ CPickups::TestForPickupsInBubble(CVector pos, float range)
 
 bool
 CPickups::TryToMerge_WeaponType(CVector pos, eWeaponType weapon, uint8 type, uint32 quantity, bool unused) {
+    if(vccoop::Active()) return false; // Each network loot identity retains its own committed ammo.
 	for (int i = 0; i < NUMPICKUPS; i++) {
 		if (aPickUps[i].m_eType == type && aPickUps[i].m_eModelIndex == ModelForWeapon(weapon))
 			if ((aPickUps[i].m_vecPos - pos).Magnitude() < 7.5f) {
@@ -807,6 +813,7 @@ CPickups::RemovePickUp(int32 pickupIndex)
 {
 	int32 index = GetActualPickupIndex(pickupIndex);
 	if (index == -1) return;
+    vccoop::PickupRemoving(&aPickUps[index]);
 
 	if (aPickUps[index].m_pObject) {
 		CWorld::Remove(aPickUps[index].m_pObject);
@@ -895,7 +902,7 @@ CPickups::GenerateNewOne(CVector pos, uint32 modelIndex, uint8 type, uint32 quan
 		CWorld::Add(aPickUps[slot].m_pObject);
 	if (aPickUps[slot].m_pExtraObject)
 		CWorld::Add(aPickUps[slot].m_pExtraObject);
-	return GetNewUniquePickupIndex(slot);
+	int32 handle=GetNewUniquePickupIndex(slot);vccoop::PickupCreated(&aPickUps[slot]);return handle;
 }
 
 int32

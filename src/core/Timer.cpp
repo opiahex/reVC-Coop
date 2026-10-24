@@ -86,6 +86,34 @@ void CTimer::Shutdown(void)
 	;
 }
 
+// Simulation uses Vice City's original 30 Hz cadence independently of drawing.
+// Keep the wall-clock baseline fresh for the platform's render limiter and for
+// a later return to offline timing, including frames with no simulation tick.
+void CTimer::SyncRenderClock(void)
+{
+#ifdef _WIN32
+	if (_nCyclesPerMS) QueryPerformanceCounter(&_oldPerfCounter);
+	else
+#endif
+		oldPcTimer = RsTimer();
+}
+void CTimer::UpdateFixedStep(void)
+{
+	static double pauseFraction=0.0,gameFraction=0.0;
+	constexpr double step=1000.0/30.0;
+	m_snPreviousTimeInMilliseconds=m_snTimeInMilliseconds;
+	pauseFraction+=step;
+	m_snTimeInMillisecondsPauseMode+=uint32(pauseFraction);pauseFraction-=uint32(pauseFraction);
+	const double elapsed=GetIsPaused()?0.0:step*ms_fTimeScale;
+	gameFraction+=elapsed;auto ms=uint32(gameFraction);gameFraction-=ms;
+	m_snTimeInMilliseconds+=ms;m_snTimeInMillisecondsNonClipped+=ms;
+	ms_fTimeStep=ms_fTimeStepNonClipped=float(elapsed*.05);
+	++m_FrameCounter;
+#ifdef FIX_BUGS
+	m_LogicalFramesPassed=1;++m_LogicalFrameCounter;
+#endif
+}
+
 #ifdef FIX_BUGS
 void CTimer::Update(void)
 { 

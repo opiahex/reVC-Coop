@@ -1,4 +1,5 @@
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "RwHelper.h"
 #include "PlayerPed.h"
@@ -52,7 +53,7 @@ CPlayerPed::~CPlayerPed()
 	delete m_pWanted;
 }
 
-CPlayerPed::CPlayerPed(void) : CPed(PEDTYPE_PLAYER1)
+CPlayerPed::CPlayerPed(ePedType type) : CPed(type)
 {
 	m_fMoveSpeed = 0.0f;
 	SetModelIndex(MI_PLAYER);
@@ -162,6 +163,7 @@ CPlayerPed::ClearAdrenaline(void)
 CPlayerInfo *
 CPlayerPed::GetPlayerInfoForThisPlayerPed()
 {
+	if(auto* info=vccoop::RemotePlayerInfo(this)) return info;
 	if (CWorld::Players[0].m_pPed == this)
 		return &CWorld::Players[0];
 
@@ -271,11 +273,11 @@ CPlayerPed::SetInitialState(void)
 {
 	m_nDrunkenness = 0;
 	m_nFadeDrunkenness = 0;
-	CMBlur::ClearDrunkBlur();
+	if(m_nPedType==PEDTYPE_PLAYER1) CMBlur::ClearDrunkBlur();
 	m_nDrunkCountdown = 0;
 	m_bAdrenalineActive = false;
 	m_nAdrenalineTime = 0;
-	CTimer::SetTimeScale(1.0f);
+	if(m_nPedType==PEDTYPE_PLAYER1) CTimer::SetTimeScale(1.0f);
 	m_pSeekTarget = nil;
 	m_vecSeekPos = CVector(0.0f, 0.0f, 0.0f);
 	m_fleeFromPos = CVector2D(0.0f, 0.0f);
@@ -303,7 +305,7 @@ CPlayerPed::SetInitialState(void)
 	bIsPedDieAnimPlaying = false;
 	SetRealMoveAnim();
 	m_bCanBeDamaged = true;
-	m_pedStats->m_temper = 50;
+	if(m_nPedType==PEDTYPE_PLAYER1) m_pedStats->m_temper = 50;
 	m_fWalkAngle = 0.0f;
 	if (m_attachedTo && !bUsesCollision)
 		bUsesCollision = true;

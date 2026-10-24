@@ -1,4 +1,5 @@
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "Pools.h"
 #include "ModelIndices.h"
@@ -71,6 +72,7 @@ CEventList::RegisterEvent(eEventType type, eEventEntity entityType, CEntity *ent
 	}
 #endif
 
+    if(vccoop::Active() && type!=EVENT_GUNSHOT && ent && ent->IsPed() && vccoop::ReplicaPed(static_cast<CPed*>(ent))) return;
 	copsDontCare = false;
 	switch(entityType){
 	case EVENT_ENTITY_PED:
@@ -92,7 +94,7 @@ CEventList::RegisterEvent(eEventType type, eEventEntity entityType, CEntity *ent
 	for(i = 0; i < NUMEVENTS; i++)
 		if(gaEvent[i].type == type &&
 		   gaEvent[i].entityType == entityType &&
-		   gaEvent[i].entityRef == ref){
+		   gaEvent[i].entityRef == ref && (!vccoop::Active() || gaEvent[i].criminal == criminal)){
 			gaEvent[i].timeout = CTimer::GetTimeInMilliseconds() + timeout;
 			return;
 		}
@@ -218,7 +220,7 @@ CEventList::ReportCrimeForEvent(eEventType type, intptr crimeId, bool copsDontCa
 	default: crime = CRIME_NONE; break;
 	}
 	
-	if (crime == CRIME_HIT_PED && IsPedPointerValid((CPed*)crimeId) && FindPlayerPed()->m_pWanted->GetWantedLevel() == 0 && ((CPed*)crimeId)->bBeingChasedByPolice) {
+	if (crime == CRIME_HIT_PED && FindPlayerPed()==vccoop::LocalPlayer() && IsPedPointerValid((CPed*)crimeId) && FindPlayerPed()->m_pWanted->GetWantedLevel() == 0 && ((CPed*)crimeId)->bBeingChasedByPolice) {
 		if (!((CPed*)crimeId)->DyingOrDead()) {
 			CMessages::AddBigMessage(TheText.Get("GOODBOY"), 5000, 0);
 			CWorld::Players[CWorld::PlayerInFocus].m_nMoney += 50;
@@ -236,12 +238,13 @@ CEventList::ReportCrimeForEvent(eEventType type, intptr crimeId, bool copsDontCa
 #endif
 	CVector playerCoors = FindPlayerCoors();
 
+    uint32 reportId=vccoop::CrimeIdentity((CEntity*)crimeId);if(!reportId) reportId=(uint32)crimeId;
 	if(CWanted::WorkOutPolicePresence(playerCoors, 14.0f) != 0 ||
 		CGame::germanGame && (crime == CRIME_SHOOT_PED || crime == CRIME_SHOOT_COP || crime == CRIME_COP_BURNED || crime == CRIME_VEHICLE_BURNED)){
-		FindPlayerPed()->m_pWanted->RegisterCrime_Immediately(crime, playerPedCoors, (uint32)crimeId, copsDontCare);
+		FindPlayerPed()->m_pWanted->RegisterCrime_Immediately(crime, playerPedCoors, reportId, copsDontCare);
 		FindPlayerPed()->m_pWanted->SetWantedLevelNoDrop(1);
 	}else
-		FindPlayerPed()->m_pWanted->RegisterCrime(crime, playerPedCoors, (uint32)crimeId, copsDontCare);
+		FindPlayerPed()->m_pWanted->RegisterCrime(crime, playerPedCoors, reportId, copsDontCare);
 
 	if(type == EVENT_ASSAULT_POLICE)
 		FindPlayerPed()->SetWantedLevelNoDrop(1);

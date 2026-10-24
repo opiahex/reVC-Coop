@@ -5428,32 +5428,36 @@ CAutomobile::Fix(void)
 }
 
 void
-CAutomobile::SetupDamageAfterLoad(void)
+CAutomobile::SetupDamageAfterLoad(bool noFlyingComponents)
 {
 	if(m_aCarNodes[CAR_BUMP_FRONT])
-		SetBumperDamage(CAR_BUMP_FRONT, VEHBUMPER_FRONT);
+		SetBumperDamage(CAR_BUMP_FRONT, VEHBUMPER_FRONT, noFlyingComponents);
 	if(m_aCarNodes[CAR_BONNET])
-		SetDoorDamage(CAR_BONNET, DOOR_BONNET);
+		SetDoorDamage(CAR_BONNET, DOOR_BONNET, noFlyingComponents);
 	if(m_aCarNodes[CAR_BUMP_REAR])
-		SetBumperDamage(CAR_BUMP_REAR, VEHBUMPER_REAR);
+		SetBumperDamage(CAR_BUMP_REAR, VEHBUMPER_REAR, noFlyingComponents);
 	if(m_aCarNodes[CAR_BOOT])
-		SetDoorDamage(CAR_BOOT, DOOR_BOOT);
+		SetDoorDamage(CAR_BOOT, DOOR_BOOT, noFlyingComponents);
 	if(m_aCarNodes[CAR_DOOR_LF])
-		SetDoorDamage(CAR_DOOR_LF, DOOR_FRONT_LEFT);
+		SetDoorDamage(CAR_DOOR_LF, DOOR_FRONT_LEFT, noFlyingComponents);
 	if(m_aCarNodes[CAR_DOOR_RF])
-		SetDoorDamage(CAR_DOOR_RF, DOOR_FRONT_RIGHT);
+		SetDoorDamage(CAR_DOOR_RF, DOOR_FRONT_RIGHT, noFlyingComponents);
 	if(m_aCarNodes[CAR_DOOR_LR])
-		SetDoorDamage(CAR_DOOR_LR, DOOR_REAR_LEFT);
+		SetDoorDamage(CAR_DOOR_LR, DOOR_REAR_LEFT, noFlyingComponents);
 	if(m_aCarNodes[CAR_DOOR_RR])
-		SetDoorDamage(CAR_DOOR_RR, DOOR_REAR_RIGHT);
+		SetDoorDamage(CAR_DOOR_RR, DOOR_REAR_RIGHT, noFlyingComponents);
 	if(m_aCarNodes[CAR_WING_LF])
-		SetPanelDamage(CAR_WING_LF, VEHPANEL_FRONT_LEFT);
+		SetPanelDamage(CAR_WING_LF, VEHPANEL_FRONT_LEFT, noFlyingComponents);
 	if(m_aCarNodes[CAR_WING_RF])
-		SetPanelDamage(CAR_WING_RF, VEHPANEL_FRONT_RIGHT);
+		SetPanelDamage(CAR_WING_RF, VEHPANEL_FRONT_RIGHT, noFlyingComponents);
 	if(m_aCarNodes[CAR_WING_LR])
-		SetPanelDamage(CAR_WING_LR, VEHPANEL_REAR_LEFT);
+		SetPanelDamage(CAR_WING_LR, VEHPANEL_REAR_LEFT, noFlyingComponents);
 	if(m_aCarNodes[CAR_WING_RR])
-		SetPanelDamage(CAR_WING_RR, VEHPANEL_REAR_RIGHT);
+		SetPanelDamage(CAR_WING_RR, VEHPANEL_REAR_RIGHT, noFlyingComponents);
+    if(noFlyingComponents && m_aCarNodes[CAR_WINDSCREEN]) {
+        auto status=Damage.GetPanelStatus(VEHPANEL_WINDSCREEN);
+        SetComponentVisibility(m_aCarNodes[CAR_WINDSCREEN],status==PANEL_STATUS_MISSING?ATOMIC_FLAG_NONE:status==PANEL_STATUS_OK?ATOMIC_FLAG_OK:ATOMIC_FLAG_DAM);
+    }
 }
 
 RwObject*

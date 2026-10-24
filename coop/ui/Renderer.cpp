@@ -321,6 +321,10 @@ void Renderer::Image(void* texture,float x,float y,float w,float h,uint32_t colo
     SetTexture(static_cast<IDirect3DTexture9*>(texture));
     Quad(x,y,w,h,0,0,1,1,color);
 }
+void Renderer::ImageRegion(void* texture,float x,float y,float w,float h,float u0,float v0,float u1,float v1,uint32_t color) {
+    if(!m_inFrame || !texture || !(color>>24)) return;
+    SetTexture(static_cast<IDirect3DTexture9*>(texture));Quad(x,y,w,h,u0,v0,u1,v1,color);
+}
 void Renderer::Rect(float x, float y, float w, float h, uint32_t argb) {
     if (!m_inFrame || (argb >> 24) == 0) return;
     Font& f = m_fonts[FONT_NORMAL];

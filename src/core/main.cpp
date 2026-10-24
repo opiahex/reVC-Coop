@@ -1541,7 +1541,9 @@ Render2dStuffAfterFade(void)
 void
 Idle(void *arg)
 {
-	CTimer::Update();
+	const auto simulationSteps=vccoop::SimulationSteps();
+	if(vccoop::FixedSimulation()) CTimer::SyncRenderClock();
+	else CTimer::Update();
 
 	tbInit();
 
@@ -1552,7 +1554,12 @@ Idle(void *arg)
 	CPointLights::InitPerFrame();
 
 	tbStartTimer(0, "CGame::Process");
-	CGame::Process();
+	for(unsigned step=0;step<simulationSteps;++step) {
+		if(vccoop::FixedSimulation()) CTimer::UpdateFixedStep();
+		vccoop::BeforeSimulationStep();
+		CGame::Process();
+		vccoop::AfterSimulationStep();
+	}
 	tbEndTimer("CGame::Process");
 	POP_MEMID();
 
@@ -1571,6 +1578,7 @@ Idle(void *arg)
 		return;
 	}
 	
+	vccoop::InterpolatedFrame interpolatedFrame;
 	SetLightsWithTimeOfDayColour(Scene.world);
 
 	if(arg == nil)

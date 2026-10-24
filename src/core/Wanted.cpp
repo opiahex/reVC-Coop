@@ -1,4 +1,5 @@
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "Pools.h"
 #include "ModelIndices.h"
@@ -123,6 +124,7 @@ CWanted::SetWantedLevel(int32 level)
 void
 CWanted::SetWantedLevelNoDrop(int32 level)
 {
+	if(vccoop::RouteWanted(this,level)) return;
 	if (m_nWantedLevel < m_nMinWantedLevel)
 		SetWantedLevel(m_nMinWantedLevel);
 
@@ -175,12 +177,14 @@ CWanted::SetMaximumWantedLevel(int32 level)
 void
 CWanted::RegisterCrime(eCrimeType type, const CVector &coors, uint32 id, bool policeDoesntCare)
 {
+	if(vccoop::RouteCrime(this,type,coors,id,false,policeDoesntCare)) return;
 	AddCrimeToQ(type, id, coors, false, policeDoesntCare);
 }
 
 void
 CWanted::RegisterCrime_Immediately(eCrimeType type, const CVector &coors, uint32 id, bool policeDoesntCare)
 {
+	if(vccoop::RouteCrime(this,type,coors,id,true,policeDoesntCare)) return;
 #ifdef FIX_SIGNIFICANT_BUGS
 	if(!AddCrimeToQ(type, id, coors, true, policeDoesntCare))
 #else
@@ -317,43 +321,43 @@ CWanted::UpdateWantedLevel()
 
 	if (m_nChaos >= 0 && m_nChaos < 50) {
 		if (m_nWantedLevel == 1)
-			++CStats::WantedStarsEvaded;
+			if(!vccoop::RemoteWanted(this)) ++CStats::WantedStarsEvaded;
 		m_nWantedLevel = 0;
 		m_MaximumLawEnforcerVehicles = 0;
 		m_MaxCops = 0;
 		m_RoadblockDensity = 0;
 	} else if (m_nChaos >= 50 && m_nChaos < 180) {
-		CStats::WantedStarsAttained += 1 - m_nWantedLevel;
+		if(!vccoop::RemoteWanted(this)) CStats::WantedStarsAttained += 1 - m_nWantedLevel;
 		m_nWantedLevel = 1;
 		m_MaximumLawEnforcerVehicles = 1;
 		m_MaxCops = 1;
 		m_RoadblockDensity = 0;
 	} else if (m_nChaos >= 180 && m_nChaos < 550) {
-		CStats::WantedStarsAttained += 2 - m_nWantedLevel;
+		if(!vccoop::RemoteWanted(this)) CStats::WantedStarsAttained += 2 - m_nWantedLevel;
 		m_nWantedLevel = 2;
 		m_MaximumLawEnforcerVehicles = 2;
 		m_MaxCops = 3;
 		m_RoadblockDensity = 0;
 	} else if (m_nChaos >= 550 && m_nChaos < 1200) {
-		CStats::WantedStarsAttained += 3 - m_nWantedLevel;
+		if(!vccoop::RemoteWanted(this)) CStats::WantedStarsAttained += 3 - m_nWantedLevel;
 		m_nWantedLevel = 3;
 		m_MaximumLawEnforcerVehicles = 2;
 		m_MaxCops = 4;
 		m_RoadblockDensity = 12;
 	} else if (m_nChaos >= 1200 && m_nChaos < 2400) {
-		CStats::WantedStarsAttained += 4 - m_nWantedLevel;
+		if(!vccoop::RemoteWanted(this)) CStats::WantedStarsAttained += 4 - m_nWantedLevel;
 		m_nWantedLevel = 4;
 		m_MaximumLawEnforcerVehicles = 2;
 		m_MaxCops = 6;
 		m_RoadblockDensity = 18;
 	} else if (m_nChaos >= 2400 && m_nChaos < 4800) {
-		CStats::WantedStarsAttained += 5 - m_nWantedLevel;
+		if(!vccoop::RemoteWanted(this)) CStats::WantedStarsAttained += 5 - m_nWantedLevel;
 		m_nWantedLevel = 5;
 		m_MaximumLawEnforcerVehicles = 3;
 		m_MaxCops = 8;
 		m_RoadblockDensity = 24;
 	} else if (m_nChaos >= 4800) {
-		CStats::WantedStarsAttained += 6 - m_nWantedLevel;
+		if(!vccoop::RemoteWanted(this)) CStats::WantedStarsAttained += 6 - m_nWantedLevel;
 		m_nWantedLevel = 6;
 		m_MaximumLawEnforcerVehicles = 3;
 		m_MaxCops = 10;

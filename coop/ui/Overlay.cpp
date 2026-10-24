@@ -209,6 +209,14 @@ void Overlay::DrawIndicators(const std::vector<PlayerIndicator>& indicators) {
         const float fade=std::clamp((85-p.distance)/20,0.f,1.f),s=std::clamp(g.Scale(),.8f,1.5f);
         const float width=76*s,x=p.x-width/2,y=p.y;
         g.Text(FONT_CHAT,p.x,y-23*s,p.name+" ("+std::to_string(p.id)+")",WithAlpha(PlayerColor(p.id),fade),TEXT_CENTER|TEXT_OUTLINE);
+        if(p.wanted && p.wantedIcon) {
+            const unsigned stars=std::min<unsigned>(p.wanted,6);float left=p.x-float(stars)*13*s/2;
+            for(unsigned i=0;i<stars;++i) {
+                auto draw=[&](float dx,float dy,uint32_t color){g.ImageRegion(p.wantedIcon,left+i*13*s+dx,y-40*s+dy,15*s,16*s,14.f/16,1.f/12.8f+.0021f,15.f/16-.001f,2.f/12.8f-.0021f,WithAlpha(color,fade));};
+                for(int ox=-1;ox<=1;++ox) for(int oy=-1;oy<=1;++oy) if(ox || oy) draw(float(ox),float(oy),0xFF000000);
+                draw(0,0,0xFF61C2F7);
+            }
+        }
         auto bar=[&](float top,float value,uint32_t color) {
             g.Rect(x-1,top-1,width+2,7*s+2,WithAlpha(0xFF000000,fade));
             g.Rect(x,top,width,7*s,WithAlpha(0xFF471E28,fade));
@@ -227,7 +235,7 @@ void Overlay::DrawIndicators(const std::vector<PlayerIndicator>& indicators) {
         const float alpha=fade*std::min(1.f,float(8000-age)/1000);
         auto lines=g.Wrap(FONT_CHAT,bubble.text,260*s);
         if(lines.size()>4) lines.resize(4);
-        float top=y-35*s-float(lines.size())*(g.LineHeight(FONT_CHAT)+2);
+        float top=y-(p.wanted?53:35)*s-float(lines.size())*(g.LineHeight(FONT_CHAT)+2);
         for(const auto& line:lines) {
             g.TextW(FONT_CHAT,p.x,top,line,WithAlpha(0xFFFFFFFF,alpha),TEXT_CENTER|TEXT_OUTLINE);
             top+=g.LineHeight(FONT_CHAT)+2;
@@ -260,7 +268,7 @@ void Overlay::Render(void* device,const BackgroundClient::Snapshot& net,const st
         float w=820*s,h=620*s,x=(g.Width()-w)/2,y=(g.Height()-h)/2,cx=x+34*s,cw=w-68*s;
         g.Rect(0,0,g.Width(),g.Height(),0xA0060911); g.RoundRect(x+7*s,y+9*s,w,h,0x90000000,14*s); g.RoundRect(x,y,w,h,panel,14*s);
         g.Rect(cx,y,110*s,3*s,pink); g.Rect(cx+110*s,y,110*s,3*s,teal); g.Text(FONT_BIG,cx,y+26*s,"VICE CITY",white,0);
-        g.Text(FONT_MENU_SMALL,cx,y+65*s,"COOPERATIVE • reVC 0.2.2",pink,0);
+        g.Text(FONT_MENU_SMALL,cx,y+65*s,"COOPERATIVE • reVC 0.2.7",pink,0);
         g.RoundRect(x+w-248*s,y+29*s,155*s,29*s,online_ ? 0xFF153C36 : 0xFF292D3D,12*s);
         g.Text(FONT_SMALL,x+w-170*s,y+35*s,online_ ? "В СЕТИ" : "НЕ ПОДКЛЮЧЁН",online_ ? teal : muted,TEXT_CENTER);
         if(Button("×",x+w-65*s,y+24*s,34*s,34*s)) menu_=false;
@@ -301,7 +309,7 @@ void Overlay::Render(void* device,const BackgroundClient::Snapshot& net,const st
         g.Text(FONT_CHAT,g.Width()/2,top,storyTitle_,pink,TEXT_CENTER|TEXT_OUTLINE);
         if(!storyHint_.empty()) g.Text(FONT_CHAT,g.Width()/2,top+height+4*s,storyHint_,white,TEXT_CENTER|TEXT_OUTLINE);
     }
-    if(!frontend && online_ && ready && !menu_) g.Text(FONT_CHAT,g.Width()-22*s,g.Height()-g.LineHeight(FONT_CHAT)-18*s,"VC:COOP reVC 0.2.2",white,TEXT_RIGHT|TEXT_OUTLINE);
+    if(!frontend && online_ && ready && !menu_) g.Text(FONT_CHAT,g.Width()-22*s,g.Height()-g.LineHeight(FONT_CHAT)-18*s,"VC:COOP reVC 0.2.7",white,TEXT_RIGHT|TEXT_OUTLINE);
     g.End(); clicked_=false;
 }
 }

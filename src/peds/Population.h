@@ -65,7 +65,7 @@ public:
 	static void AddToPopulation(float, float, float, float);
 	static void ManagePopulation(void);
 	static void MoveCarsAndPedsOutOfAbandonedZones(void);
-	static void ConvertToRealObject(CDummyObject*);
+	static CObject* ConvertToRealObject(CDummyObject*, bool authoritative = false);
 	static void ConvertToDummyObject(CObject*);
 	static void ConvertAllObjectsToDummyObjects(void);
 	static bool TestRoomForDummyObject(CObject*);

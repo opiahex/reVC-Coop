@@ -50,7 +50,7 @@ public:
 	uint8 m_bWasControlMessageShown:1;
 
 	CObject *GiveUsAPickUpObject(CObject **object, CObject **extraObject, int32 handle, int32 extraHandle);
-	bool Update(CPlayerPed *player, CVehicle *vehicle, int playerId);
+	bool Update(CPlayerPed *player, CVehicle *vehicle, int playerId,bool networkGrant=false);
 	void GetRidOfObjects();
 	void ExtractAmmoFromPickup(CPlayerPed *player);
 	void ProcessGunShot(CVector *vec1, CVector *vec2);

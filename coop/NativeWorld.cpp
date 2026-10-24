@@ -21,6 +21,7 @@
 #include "Heli.h"
 #include "Plane.h"
 #include "Object.h"
+#include "DummyObject.h"
 #include "CarCtrl.h"
 #include "CarAI.h"
 #include "ModelInfo.h"
@@ -33,6 +34,9 @@
 #include "WeaponInfo.h"
 #include "Pad.h"
 #include "Particle.h"
+#include "ColModel.h"
+#include "Coronas.h"
+#include "EventList.h"
 
 namespace vccoop {
 namespace {
@@ -87,6 +91,18 @@ CVehicle* NewVehicle(unsigned model) {
 }
 unsigned DoorForSeat(unsigned seat) { return seat==0?CAR_DOOR_LF:seat==1?CAR_DOOR_RF:seat==2?CAR_DOOR_LR:CAR_DOOR_RR; }
 unsigned SeatForDoor(unsigned door) { return door==CAR_DOOR_RF?1:door==CAR_DOOR_LR?2:door==CAR_DOOR_RR?3:255; }
+void LightDiagnostics(CVehicle* v,std::ostream& out) {
+    if(!v->IsCar() || !v->GetClump()) return;
+    auto* info=static_cast<CVehicleModelInfo*>(CModelInfo::GetModelInfo(v->GetModelIndex()));
+    auto right=v->GetMatrix()*info->m_positions[CAR_POS_HEADLIGHTS];
+    auto left=right-v->GetRight()*(2.f*info->m_positions[CAR_POS_HEADLIGHTS].x);
+    float error=0;unsigned count=0;
+    for(unsigned index:{0u,1u,6u,7u})
+        if(auto* corona=CCoronas::Find(uintptr(v)+index);corona && corona->registeredThisFrame) {
+            error=std::max(error,(corona->coors-((index==0 || index==6)?left:right)).Magnitude());++count;
+        }
+    out<<",\"headlightError\":"<<error<<",\"headlightCount\":"<<count;
+}
 }
 struct NativeWorld::Impl {
     struct Record {
@@ -123,7 +139,9 @@ struct NativeWorld::Impl {
             CWorld::Remove(p); delete p;
         } else {
             p->bStreamingDontDelete=r.originalStreaming;
-            p->bUsesCollision=r.originalCollision;
+            // A destroyed map original must not regain an invisible collider
+            // merely because its replication record was retired/disconnected.
+            if(!p->IsObject()) p->bUsesCollision=r.originalCollision;
             if(p->IsVehicle() && !r.owned) p->SetStatus(r.originalStatus);
         }
         r.pointer=nullptr; r.handle=-1;
@@ -138,10 +156,24 @@ struct NativeWorld::Impl {
         if(!InWorld(vc::EntityPosition(e))) return false;
         if(e.creator==net.self && net.self<vc::kMaxPlayers && e.creatorEpoch==net.players[net.self].epoch)
             if(auto* original=Resolve(e.kind,int(e.key&0xFFFFFF));original && original->GetModelIndex()==e.model && !Id(original)) { Bind(r,original,false); return true; }
-        if(e.kind==vc::EntityKind::Object && !(e.object.flags&64)) {
+        if(e.kind==vc::EntityKind::Object && !e.mission && !(e.object.flags&64)) {
             auto* pool=CPools::GetObjectPool();
             for(int i=0;i<pool->GetSize();++i) if(auto* object=pool->GetSlot(i))
-                if(!Id(object) && object->GetModelIndex()==e.model && Distance(Wire(object->m_objectMatrix.GetPosition()),e.origin)<1) { Bind(r,object,false); return true; }
+                if(!Id(object) && object->GetModelIndex()==e.model && Distance(Wire(object->m_objectMatrix.GetPosition()),e.origin)<.01f) { Bind(r,object,false); return true; }
+            auto* dummies=CPools::GetDummyPool();
+            for(int i=0;i<dummies->GetSize();++i) if(auto* dummy=dummies->GetSlot(i))
+                if(dummy->GetModelIndex()==e.model && Distance(Wire(dummy->GetPosition()),e.origin)<.01f) {
+                    CStreaming::RequestModel(e.model,STREAMFLAGS_DEPENDENCY);
+                    if(!CStreaming::HasModelLoaded(e.model)) return false;
+                    if(auto* object=CPopulation::ConvertToRealObject(static_cast<CDummyObject*>(dummy),true)) {
+                        if(!object->m_rwObject) object->CreateRwObject();
+                        Bind(r,object,false);return true;
+                    }
+                    return false;
+                }
+            // Map streaming may not have instantiated its original yet. Wait for
+            // that instance instead of spawning a clone which would duplicate it later.
+            return false;
         }
         if(!CModelInfo::GetModelInfo(e.model)) return false;
         CStreaming::RequestModel(e.model,STREAMFLAGS_DONT_REMOVE);
@@ -177,6 +209,7 @@ struct NativeWorld::Impl {
             v.transform=SampleTransform(car); v.turn=Wire(car->m_vecTurnSpeed*50.f);
             v.health=std::max(car->m_fHealth,0.f); v.steer=car->m_fSteerAngle; v.gas=car->m_fGasPedal; v.brake=std::max(car->m_fBrakePedal,0.f);
             v.type=uint8_t(car->m_vehType); v.primary=car->m_currentColour1; v.secondary=car->m_currentColour2;
+            if(car->IsHeli()) {auto* h=static_cast<CHeli*>(car);v.rotor=h->m_fRotorRotation;v.searchX=h->m_fSearchLightX;v.searchY=h->m_fSearchLightY;v.searchIntensity=h->m_fSearchLightIntensity;v.heliStatus=uint8_t(h->m_heliStatus);}
             v.gear=uint8_t(car->m_nCurrentGear); v.passengers=uint8_t(std::min<unsigned>(car->m_nNumMaxPassengers,8));
             v.flags=(car->bEngineOn?1:0)|(car->bLightsOn?2:0)|(car->bRenderScorched?4:0)|(car->GetStatus()==STATUS_WRECKED?8:0);
             const float step=std::max(CTimer::GetTimeStepInSeconds(),.001f);
@@ -194,7 +227,7 @@ struct NativeWorld::Impl {
                 for(unsigned i=0;i<4;++i) v.suspension[i]=b->m_aSuspensionSpringRatio[i];
             }
         } else {
-            auto* o=static_cast<CObject*>(p);e.object.transform=SampleTransform(o);
+            auto* o=static_cast<CObject*>(p);e.object.transform=SampleTransform(o);e.object.turn=Wire(o->m_vecTurnSpeed*50.f);
             e.object.flags=(e.object.flags&64)|(o->bIsVisible?1:0)|(o->bUsesCollision?2:0)|(o->bGlassCracked?4:0)|(o->bGlassBroken?8:0)|(o->bRenderDamaged?16:0)|(o->bHasBeenDamaged?32:0);
         }
         bool valid=vc::ValidEntity(e);
@@ -222,7 +255,7 @@ struct NativeWorld::Impl {
             CVisibilityPlugins::SetClumpAlpha(ped->GetClump(),255);
         } else if(e.kind==vc::EntityKind::Vehicle) {
             auto* car=static_cast<CVehicle*>(p);const auto& v=e.vehicle;
-            auto* local=FindPlayerPed();
+            auto* local=LocalPlayer();
             if(local && local->bInVehicle && local->m_pMyVehicle==car && Distance(Wire(car->GetPosition()),v.transform.position)>50*50)
                 CStreaming::LoadSceneCollision(Native(v.transform.position));
             Transform(car,v.transform);car->m_vecTurnSpeed=Native(v.turn)*.02f;
@@ -238,7 +271,9 @@ struct NativeWorld::Impl {
                 if(changed) {
                     a->Fix(); a->Damage.m_panelStatus=v.panels;
                     for(unsigned i=0;i<6;++i) a->Damage.m_doorStatus[i]=v.doors[i];
-                    a->SetupDamageAfterLoad();
+                    // A snapshot reconstructs the body; replaying flying parts
+                    // on every later door/panel change duplicates old debris.
+                    a->SetupDamageAfterLoad(true);
                 }
                 a->Damage.m_engineStatus=v.engine;a->Damage.m_lightStatus=v.lights;
                 const unsigned nodes[]={CAR_BONNET,CAR_BOOT,CAR_DOOR_LF,CAR_DOOR_RF,CAR_DOOR_LR,CAR_DOOR_RR};
@@ -252,6 +287,7 @@ struct NativeWorld::Impl {
                 for(unsigned i=0;i<2;++i) {b->m_wheelStatus[i]=v.wheels[i];b->m_aWheelRotation[i]=v.wheelAngle[i];b->m_aWheelSpeed[i]=v.wheelOmega[i]*CTimer::GetTimeStepInSeconds();b->m_aWheelPosition[i]=v.wheelPosition[i];}
                 for(unsigned i=0;i<4;++i) b->m_aSuspensionSpringRatio[i]=v.suspension[i];
             }
+            if(car->IsHeli()) {auto* h=static_cast<CHeli*>(car);h->m_fRotorRotation=v.rotor;h->m_fSearchLightX=v.searchX;h->m_fSearchLightY=v.searchY;h->m_fSearchLightIntensity=v.searchIntensity;h->m_heliStatus=int8_t(v.heliStatus);}
             car->m_fHealth=v.health;
         } else {
             auto* o=static_cast<CObject*>(p);Transform(o,e.object.transform);
@@ -263,6 +299,12 @@ struct NativeWorld::Impl {
         }
         p->GetMatrix().UpdateRW();p->UpdateRwFrame();
     }
+    vc::Entity VehiclePose(const Record& r,double now) const {
+        // Play actual traffic paths/rotation on the NPC animation timeline.
+        // Human-driven cars keep a predicted pose for immediate local contacts.
+        for(const auto& player:net.players) if(player.active && player.hasState && player.state.vehicle==r.state.id) return r.motion.At(now);
+        return r.track.At(now-.1);
+    }
     void Scan() {
         if(!capture || !network || !players[net.self]) return;
         const auto now=vc::NowMs(); if(now-scanned<250) return; scanned=now;
@@ -271,7 +313,9 @@ struct NativeWorld::Impl {
             if(!p || sent>=16 || Id(p) || IsPlayer(p) || p->bRemoveFromWorld || !InWorld(Wire(p->GetPosition()))) return;
             bool selected=outer->PopulationOwner();
             if(!selected && !(p->IsVehicle() && players[net.self]->m_pMyVehicle==p)) return;
-            if(p->m_area!=players[net.self]->m_area || Distance(Wire(p->GetPosition()),local)>180*180) return;
+            bool nearbyViewer=false;const float range=p->IsVehicle() && static_cast<CVehicle*>(p)->IsHeli()?600.f:180.f;
+            for(auto* player:players) if(player && player->m_area==p->m_area && Distance(Wire(p->GetPosition()),Wire(player->GetPosition()))<range*range) nearbyViewer=true;
+            if(!nearbyViewer) return;
             if(kind==vc::EntityKind::Vehicle && (++cars>45 || static_cast<CVehicle*>(p)->IsTrain())) return;
             if(kind==vc::EntityKind::Ped && (++peds>48 || p->GetModelIndex()==0)) return;
             if(kind==vc::EntityKind::Object) {
@@ -298,7 +342,7 @@ uint32_t NativeWorld::Generation(uint32_t id) const {auto it=impl_->records.find
 CEntity* NativeWorld::Pointer(uint32_t id) const {auto it=impl_->records.find(id);return it!=impl_->records.end() && it->second.Valid()?it->second.pointer:nullptr;}
 bool NativeWorld::PopulationOwner() const {auto& a=*impl_;return a.net.self==a.net.host || (a.net.self<vc::kMaxPlayers && (a.net.populationMask&(1u<<a.net.self)));}
 bool NativeWorld::Hold(CPhysical* p) const {auto id=Id(p);return id && impl_->records.at(id).state.owner!=impl_->net.self;}
-bool NativeWorld::ReplicaPed(CPed* p) const {return p && p!=FindPlayerPed() && (impl_->IsPlayer(p)||Hold(p));}
+bool NativeWorld::ReplicaPed(CPed* p) const {return p && p!=LocalPlayer() && (impl_->IsPlayer(p)||Hold(p));}
 void NativeWorld::Clear() {
     auto& a=*impl_;for(auto& [id,r]:a.records) if(r.state.kind==vc::EntityKind::Ped) a.Destroy(r);
     for(auto& [id,r]:a.records) a.Destroy(r);
@@ -317,7 +361,7 @@ void NativeWorld::Begin(const vc::BackgroundClient::Snapshot& net,vc::Background
         if(!fresh && (r.state.kind!=e.kind || r.state.model!=e.model)) {a.Destroy(r);r=Impl::Record{};fresh=true;}
         r.state=e;bool owns=e.owner==net.self;
         bool existed=r.Valid();
-        auto* localPed=FindPlayerPed();
+        auto* localPed=LocalPlayer();
         bool localRide=localPed && localPed->bInVehicle && ((e.kind==vc::EntityKind::Vehicle && r.pointer==localPed->m_pMyVehicle) || (e.kind==vc::EntityKind::Ped && e.ped.vehicle==Id(localPed->m_pMyVehicle)));
         if(!owns && !localRide && localPed && (e.area!=localPed->m_area || Distance(vc::EntityPosition(e),Wire(localPed->GetPosition()))>300*300)) {
             if(r.allocated) a.Destroy(r);continue;
@@ -338,16 +382,22 @@ void NativeWorld::Begin(const vc::BackgroundClient::Snapshot& net,vc::Background
         if(!owns) {
             if(!r.received || r.received!=entry.received || r.sequence!=entry.sequence) {
                 if(e.kind==vc::EntityKind::Vehicle) r.motion.Push(double(entry.received)*.001,e,double(now)*.001);
-                else r.track.Push(double(entry.received)*.001,e);
+                r.track.Push(double(entry.received)*.001,e,double(now)*.001);
                 r.received=entry.received;r.sequence=entry.sequence;
             }
-            a.Pose(r,e.kind==vc::EntityKind::Vehicle?r.motion.At(double(now)*.001):r.track.At(double(now)*.001-.1));
+            a.Pose(r,e.kind==vc::EntityKind::Vehicle?a.VehiclePose(r,ReplicaTime()):r.track.At(ReplicaTime()-.1));
         } else if(changed || !existed) {
             if(r.allocated || (!fresh && !r.owned)) a.Pose(r,e);
+            if(r.pointer->IsPed()) {
+                // A newly authoritative former mirror must regain native AI
+                // eligibility and physical movement, not its replica mission immunity.
+                auto* ped=static_cast<CPed*>(r.pointer);ped->CharCreatedBy=e.mission?MISSION_CHAR:RANDOM_CHAR;
+                ped->bAffectedByGravity=true;ped->bUsesCollision=!ped->bInVehicle && !ped->DyingOrDead();
+            }
             if((r.allocated || (!fresh && !r.owned)) && r.pointer->IsVehicle()) {
                 auto* v=static_cast<CVehicle*>(r.pointer);
-                v->SetStatus(v->pDriver==FindPlayerPed()?STATUS_PLAYER:v->pDriver?STATUS_PHYSICS:STATUS_ABANDONED);
-                if(v->pDriver && v->pDriver!=FindPlayerPed()) {CCarCtrl::JoinCarWithRoadSystem(v);v->AutoPilot.m_nCarMission=MISSION_CRUISE;v->AutoPilot.m_nCruiseSpeed=20;}
+                v->SetStatus(v->pDriver==LocalPlayer()?STATUS_PLAYER:v->pDriver?STATUS_PHYSICS:STATUS_ABANDONED);
+                if(v->pDriver && v->pDriver!=LocalPlayer()) {CCarCtrl::JoinCarWithRoadSystem(v);v->AutoPilot.m_nCarMission=MISSION_CRUISE;v->AutoPilot.m_nCruiseSpeed=20;}
             }
         }
         r.owned=owns;r.pointer->bStreamingDontDelete=true;
@@ -355,7 +405,7 @@ void NativeWorld::Begin(const vc::BackgroundClient::Snapshot& net,vc::Background
     // A driver starts the native entry sequence only after server authority arrives.
     if(a.pendingDriver) {
         auto* e=Pointer(a.pendingDriver);if(e && Owns(e)) {
-            auto* local=FindPlayerPed();a.pendingDriver=0;
+            auto* local=LocalPlayer();a.pendingDriver=0;
             if(local && !local->bInVehicle) {local->m_vehDoor=CAR_DOOR_LF;local->SetObjective(OBJECTIVE_ENTER_CAR_AS_DRIVER,e);local->SetEnterCar(static_cast<CVehicle*>(e),CAR_DOOR_LF);}
         }
     }
@@ -363,26 +413,27 @@ void NativeWorld::Begin(const vc::BackgroundClient::Snapshot& net,vc::Background
     if(g && !a.gHeld && !CapturingInput()) Passenger();a.gHeld=g;
 }
 void NativeWorld::Reconcile() {
-    auto& a=*impl_;const double now=double(vc::NowMs())*.001;
+    auto& a=*impl_;const double now=ReplicaTime();
     // The native contact solver may temporarily move the other car while
     // solving our owner's impulse. Never let that local replica displacement
     // become its final world/render pose or accumulate across simulation ticks.
-    for(auto& [id,r]:a.records) if(r.Valid() && !r.owned && r.state.kind==vc::EntityKind::Vehicle) {
-        auto pose=r.motion.At(now);if(pose.id) a.Pose(r,pose);
-    }
-    for(auto& [id,r]:a.records) if(r.Valid() && r.state.kind==vc::EntityKind::Ped && !r.owned && r.state.ped.vehicle) Attach(static_cast<CPed*>(r.pointer),r.state.ped);
-    auto* local=FindPlayerPed();
+    for(auto kind:{vc::EntityKind::Vehicle,vc::EntityKind::Object,vc::EntityKind::Ped})
+        for(auto& [id,r]:a.records) if(r.Valid() && !r.owned && r.state.kind==kind) {
+            auto pose=kind==vc::EntityKind::Vehicle?a.VehiclePose(r,now):r.track.At(now-.1);if(pose.id) a.Pose(r,pose);
+        }
+    auto* local=LocalPlayer();
     if(local && local->bInVehicle && local->m_pMyVehicle && Hold(local->m_pMyVehicle) && local->GetPedState()==PED_DRIVING) {
         local->SetPedPositionInCar();local->GetMatrix().UpdateRW();local->UpdateRwFrame();
     }
 }
 void NativeWorld::After(vc::PlayerState& local) {
     auto& a=*impl_;if(!a.network || a.net.self>=vc::kMaxPlayers) return;
-    a.Scan();DescribeVehicle(FindPlayerPed(),local);
+    a.Scan();DescribeVehicle(LocalPlayer(),local);
     const auto now=vc::NowMs();
     std::set<uint32_t> occupied;if(local.vehicle) occupied.insert(local.vehicle);
     for(auto& player:a.net.players) if(player.active && player.hasState && player.state.vehicle) occupied.insert(player.state.vehicle);
     for(auto& [id,r]:a.records) if(r.state.owner==a.net.self && !r.state.mission && r.Valid()) {
+        if(r.pointer->IsVehicle() && static_cast<CVehicle*>(r.pointer)->IsHeli()) continue; // Native heli manager owns its flight-away/removal lifecycle.
         auto nativePosition=Wire(r.pointer->GetPosition());
         bool nearPlayer=Distance(nativePosition,local.position)<300*300;
         for(auto& player:a.net.players) if(player.active && player.hasState && Distance(nativePosition,player.state.position)<300*300) nearPlayer=true;
@@ -406,6 +457,7 @@ void NativeWorld::After(vc::PlayerState& local) {
 }
 void NativeWorld::DescribeVehicle(CPed* p,vc::PlayerState& s) const {
     s.vehicle=0;s.seat=255;s.door=uint8_t(p->m_vehDoor);s.flags&=uint8_t(~vc::kInVehicle);
+    if(!p->bInVehicle && p->GetPedState()!=PED_ENTER_CAR && p->GetPedState()!=PED_EXIT_CAR && p->GetPedState()!=PED_CARJACK) return;
     auto* v=p->m_pMyVehicle;if(!v || !IsVehiclePointerValid(v)) return;
     s.vehicle=Id(v);if(!s.vehicle) return;
     if(p->bInVehicle) s.flags|=vc::kInVehicle;
@@ -415,7 +467,7 @@ void NativeWorld::DescribeVehicle(CPed* p,vc::PlayerState& s) const {
     if(p->m_pVehicleAnim) s.vehicleAnimation=uint16_t(p->m_pVehicleAnim->animId);
 }
 void NativeWorld::Attach(CPed* p,const vc::PlayerState& s) {
-    if(!p || p==FindPlayerPed()) return;
+    if(!p || p==LocalPlayer()) return;
     auto* e=Pointer(s.vehicle);auto* v=e && e->IsVehicle()?static_cast<CVehicle*>(e):nullptr;
     if(p->m_pMyVehicle && p->m_pMyVehicle!=v) Detach(p);
     if(!v || !(s.flags&vc::kInVehicle)) {
@@ -439,7 +491,7 @@ void NativeWorld::Attach(CPed* p,const vc::PlayerState& s) {
     p->GetMatrix().UpdateRW();p->UpdateRwFrame();
 }
 bool NativeWorld::CanEnter(CPed* p,CVehicle* v) {
-    auto& a=*impl_;if(p!=FindPlayerPed() || !a.network) return true;
+    auto& a=*impl_;if(p!=LocalPlayer() || !a.network) return true;
     uint32_t id=Id(v);if(!id) return false;
     if(p->m_objective==OBJECTIVE_ENTER_CAR_AS_PASSENGER) {
         unsigned seat=SeatForDoor(p->m_vehDoor);
@@ -457,7 +509,7 @@ bool NativeWorld::CanEnter(CPed* p,CVehicle* v) {
     return false;
 }
 bool NativeWorld::Passenger() {
-    auto& a=*impl_;auto* p=FindPlayerPed();if(!p || p->bInVehicle || !a.network) return false;
+    auto& a=*impl_;auto* p=LocalPlayer();if(!p || p->bInVehicle || !a.network) return false;
     CVehicle* best=nullptr;unsigned selected=0;float distance=36.f;
     for(auto& [id,r]:a.records) if(r.state.kind==vc::EntityKind::Vehicle && r.Valid() && r.state.area==p->m_area) {
         auto* v=static_cast<CVehicle*>(r.pointer);
@@ -484,7 +536,7 @@ bool NativeWorld::Event(const vc::Message& m) {
     auto& a=*impl_;
     if(m.kind==vc::Kind::SeatGrant) {
         if(m.id==255 || m.host!=a.net.self || Generation(m.entity.id)!=m.entity.generation) return true;
-        auto* p=FindPlayerPed();auto* e=Pointer(m.entity.id);if(!p || !e || !e->IsVehicle() || p->bInVehicle) return true;
+        auto* p=LocalPlayer();auto* e=Pointer(m.entity.id);if(!p || !e || !e->IsVehicle() || p->bInVehicle) return true;
         auto* v=static_cast<CVehicle*>(e);if(m.id<1 || m.id>8 || v->pPassengers[m.id-1]) return true;
         a.lastSeatVehicle=m.entity.id;a.lastSeatIndex=m.id;a.lastSeatUntil=vc::NowMs()+8000;
         unsigned door=v->IsBike()?(DotProduct(p->GetPosition()-v->GetPosition(),v->GetRight())>=0?CAR_DOOR_RR:CAR_DOOR_LR):DoorForSeat(m.id);
@@ -494,8 +546,36 @@ bool NativeWorld::Event(const vc::Message& m) {
         auto* e=Pointer(m.entity.id);if(!e || !Owns(e) || Generation(m.entity.id)!=m.entity.generation) return true;
         auto* attacker=m.hit.source?Pointer(m.hit.source):m.sender<vc::kMaxPlayers?a.players[m.sender]:nullptr;
         a.applying=true;
-        if(e->IsPed()) static_cast<CPed*>(e)->InflictDamage(attacker,eWeaponType(m.hit.weapon),m.hit.damage,ePedPieceTypes(m.hit.piece),m.hit.direction);
-        else if(e->IsVehicle()) static_cast<CVehicle*>(e)->InflictDamage(attacker,eWeaponType(m.hit.weapon),m.hit.damage,e->GetPosition());
+        NpcPlayerScope context(static_cast<CPhysical*>(e),attacker);
+        if(e->IsPed()) {
+            auto* ped=static_cast<CPed*>(e);
+            if(attacker && !ped->DyingOrDead()) {
+                if(ped->m_nPedType==PEDTYPE_COP && attacker->IsPed() && static_cast<CPed*>(attacker)->IsPlayer()) {
+                    static_cast<CPlayerPed*>(attacker)->SetWantedLevelNoDrop(m.hit.weapon>=WEAPONTYPE_COLT45 && m.hit.weapon<=WEAPONTYPE_MINIGUN?2:1);
+                    if(ped->GetPedState()==PED_FLEE_ENTITY || ped->GetPedState()==PED_FLEE_POS) ped->ClearFlee();
+                    auto* cop=static_cast<CCopPed*>(ped);cop->SetPursuit(true);
+                } else ped->ReactToAttack(attacker);
+                if(m.hit.weapon>=WEAPONTYPE_COLT45 && m.hit.weapon<=WEAPONTYPE_MINIGUN && ped->IsPedInControl() && !ped->bIsDucking) {
+                    ped->ClearAttackByRemovingAnim();
+                    auto* hit=CAnimManager::AddAnimation(ped->GetClump(),ASSOCGRP_STD,AnimationId(ANIM_STD_HITBYGUN_FRONT+m.hit.direction));
+                    if(hit) {hit->blendAmount=0;hit->blendDelta=8;}
+                }
+            }
+            ped->InflictDamage(attacker,eWeaponType(m.hit.weapon),m.hit.damage,ePedPieceTypes(m.hit.piece),m.hit.direction);
+            if(attacker && attacker->IsPed()) {
+                bool cop=ped->m_nPedType==PEDTYPE_COP;bool gun=m.hit.weapon>=WEAPONTYPE_COLT45 && m.hit.weapon<=WEAPONTYPE_MINIGUN;
+                auto type=gun?(cop?EVENT_SHOOT_COP:EVENT_SHOOT_PED):(cop?EVENT_ASSAULT_POLICE:EVENT_ASSAULT);
+                CEventList::RegisterEvent(type,EVENT_ENTITY_PED,ped,static_cast<CPed*>(attacker),1000);
+            }
+        }
+        else if(e->IsVehicle()) {
+            auto* v=static_cast<CVehicle*>(e);
+            if(attacker) {
+                if(v->pDriver && OwnerPed(v->pDriver)) v->pDriver->ReactToAttack(attacker);
+                for(auto* ped:v->pPassengers) if(ped && OwnerPed(ped)) ped->ReactToAttack(attacker);
+            }
+            v->InflictDamage(attacker,eWeaponType(m.hit.weapon),m.hit.damage,e->GetPosition());
+        }
         else static_cast<CObject*>(e)->ObjectDamage(m.hit.damage);
         a.applying=false;return true;
     }
@@ -510,11 +590,11 @@ bool NativeWorld::Event(const vc::Message& m) {
 bool NativeWorld::RouteDamage(CEntity* victim,CEntity* attacker,int weapon,float damage,int piece,uint8_t direction) {
     auto& a=*impl_;if(a.applying || !a.network) return false;
     auto id=Id(victim);if(!id || Owns(victim)) return false;
-    if(attacker==FindPlayerPed() || (FindPlayerPed() && attacker==FindPlayerPed()->m_pMyVehicle) || Owns(attacker)) {
+    if(attacker==LocalPlayer() || (LocalPlayer() && attacker==LocalPlayer()->m_pMyVehicle) || Owns(attacker)) {
         vc::Message hit;hit.kind=vc::Kind::EntityHit;hit.entity.id=id;hit.entity.generation=Generation(id);
         hit.hit.weapon=uint8_t(weapon);hit.hit.damage=std::clamp(damage,0.01f,1000.f);hit.hit.piece=uint8_t(std::clamp(piece,0,6));hit.hit.direction=direction;
-        hit.hit.source=Id(attacker);if(attacker==FindPlayerPed()) hit.hit.source=0;
-        hit.hit.sourceGeneration=Generation(hit.hit.source);hit.hit.sourceLife=a.capture?a.capture(FindPlayerPed()).life:1;a.network->SendEvent(hit);
+        hit.hit.source=Id(attacker);if(attacker==LocalPlayer()) hit.hit.source=0;
+        hit.hit.sourceGeneration=Generation(hit.hit.source);hit.hit.sourceLife=a.capture?a.capture(LocalPlayer()).life:1;a.network->SendEvent(hit);
     }
     return true;
 }
@@ -530,7 +610,7 @@ void NativeWorld::Contact(CPhysical* self,CPhysical* other,const CVector& before
 }
 void NativeWorld::TraceVehicles(std::ostream& out,uint64_t now) const {
     const auto& a=*impl_;std::set<uint32_t> occupied;
-    if(auto* local=FindPlayerPed();local && local->bInVehicle) occupied.insert(Id(local->m_pMyVehicle));
+    if(auto* local=LocalPlayer();local && local->bInVehicle) occupied.insert(Id(local->m_pMyVehicle));
     for(const auto& p:a.net.players) if(p.active && p.hasState && p.state.vehicle) occupied.insert(p.state.vehicle);
     for(uint32_t id:occupied) {
         auto it=a.records.find(id);if(it==a.records.end() || !it->second.Valid() || it->second.state.kind!=vc::EntityKind::Vehicle) continue;
@@ -542,23 +622,26 @@ void NativeWorld::TraceVehicles(std::ostream& out,uint64_t now) const {
     }
 }
 void NativeWorld::Diagnostics(std::ostream& out) const {
-    auto& a=*impl_;out<<",\"populationOwner\":"<<PopulationOwner()<<",\"entities\":[";bool comma=false;
+    unsigned temporary=0;auto* objects=CPools::GetObjectPool();for(int i=0;i<objects->GetSize();++i) if(auto* o=objects->GetSlot(i)) if(o->ObjectCreatedBy==TEMP_OBJECT) ++temporary;
+    auto& a=*impl_;out<<",\"temporaryObjects\":"<<temporary<<",\"populationOwner\":"<<PopulationOwner()<<",\"entities\":[";bool comma=false;
     for(auto& [id,r]:a.records) if(r.Valid()) {
         if(comma) out<<",";comma=true;auto pos=r.pointer->GetPosition();
         out<<"{\"id\":"<<id<<",\"kind\":"<<int(r.state.kind)<<",\"owner\":"<<unsigned(r.state.owner)<<",\"generation\":"<<r.state.generation<<",\"ageMs\":"<<(vc::NowMs()-a.net.entities.at(id).received)<<",\"model\":"<<r.state.model<<",\"position\":["<<pos.x<<","<<pos.y<<","<<pos.z<<"]";
+        out<<",\"playoutDelayMs\":"<<r.track.Delay()*1000;
         if(r.state.kind==vc::EntityKind::Vehicle) {
             auto* v=static_cast<CVehicle*>(r.pointer);auto velocity=v->m_vecMoveSpeed*50.f;
             auto* frame=v->GetClump()?RpClumpGetFrame(v->GetClump()):nullptr;auto rendered=frame?RwFrameGetLTM(frame)->pos:pos;auto forward=v->GetForward();auto received=vc::EntityPosition(r.state);
             out<<",\"renderPosition\":["<<rendered.x<<","<<rendered.y<<","<<rendered.z<<"],\"velocity\":["<<velocity.x<<","<<velocity.y<<","<<velocity.z<<"],\"forward\":["<<forward.x<<","<<forward.y<<","<<forward.z<<"],\"wirePosition\":["<<received.x<<","<<received.y<<","<<received.z<<"],\"sequence\":"<<a.net.entities.at(id).sequence;
+            LightDiagnostics(v,out);
             out<<",\"health\":"<<v->m_fHealth<<",\"driver\":"<<(v->pDriver!=nullptr)<<",\"passengers\":"<<int(v->m_nNumPassengers)<<",\"status\":"<<int(v->GetStatus());if(v->IsCar()) {auto* c=static_cast<CAutomobile*>(v);out<<",\"wheel\":"<<c->m_aWheelRotation[0]<<",\"door\":"<<int(c->Damage.m_doorStatus[0])<<",\"panels\":"<<c->Damage.m_panelStatus;out<<",\"steer\":"<<v->m_fSteerAngle<<",\"gas\":"<<v->m_fGasPedal<<",\"lights\":"<<c->Damage.m_lightStatus;}}
         if(r.state.kind==vc::EntityKind::Ped) {
-            auto* ped=static_cast<CPed*>(r.pointer);auto sampled=a.capture(ped);out<<",\"health\":"<<ped->m_fHealth<<",\"armour\":"<<ped->m_fArmour;out<<",\"lastRenderAgoMs\":"<<(r.renderedAt?vc::NowMs()-r.renderedAt:999999);
+            auto* ped=static_cast<CPed*>(r.pointer);auto sampled=a.capture(ped);out<<" ,\"objective\":"<<unsigned(ped->m_objective)<<",\"waitState\":"<<unsigned(ped->m_nWaitState)<<",\"threatFlags\":"<<ped->m_threatFlags<<",\"threatPlayer\":"<<PlayerId(ped->m_threatEntity)<<",\"fleePlayer\":"<<PlayerId(ped->m_fleeFrom)<<",\"objectivePlayer\":"<<PlayerId(ped->m_pedInObjective)<<",\"lookPlayer\":"<<PlayerId(ped->m_pLookTarget)<<",\"type\":"<<unsigned(ped->m_nPedType);out<<",\"health\":"<<ped->m_fHealth<<",\"armour\":"<<ped->m_fArmour;out<<",\"lastRenderAgoMs\":"<<(r.renderedAt?vc::NowMs()-r.renderedAt:999999);
             auto rendered=RwFrameGetMatrix(RpClumpGetFrame(ped->GetClump()))->pos;
             out<<",\"vehicle\":"<<Id(ped->m_pMyVehicle)<<",\"inVehicle\":"<<ped->bInVehicle<<",\"pedState\":"<<unsigned(ped->GetPedState())<<",\"visible\":"<<ped->bIsVisible<<",\"alpha\":"<<CVisibilityPlugins::GetClumpAlpha(ped->GetClump())<<",\"offscreen\":"<<ped->bOffscreen<<",\"moving\":"<<(ped->m_movingListNode!=nullptr)<<",\"netAnimations\":"<<unsigned(r.state.ped.animationCount)<<",\"animations\":[";
             for(unsigned i=0;i<sampled.animationCount;++i) {if(i) out<<",";auto& anim=sampled.animations[i];out<<"["<<anim.group<<","<<anim.id<<","<<anim.blend<<","<<anim.time<<"]";}
             out<<"],\"renderPosition\":["<<rendered.x<<","<<rendered.y<<","<<rendered.z<<"],\"bones\":[";
             bool boneComma=false;
-            for(unsigned tag:{3u,22u,32u,42u,52u}) if(auto* frame=RpAnimBlendClumpFindBone(ped->GetClump(),tag);frame && frame->hanimFrame) {
+            for(unsigned tag:{0u,1u,2u,3u,22u,32u,42u,52u}) if(auto* frame=RpAnimBlendClumpFindBone(ped->GetClump(),tag);frame && frame->hanimFrame) {
                 if(boneComma) out<<",";boneComma=true;auto q=frame->hanimFrame->q;auto t=frame->hanimFrame->t;
                 out<<"["<<tag<<","<<q.imag.x<<","<<q.imag.y<<","<<q.imag.z<<","<<q.real<<","<<t.x<<","<<t.y<<","<<t.z<<"]";
             }
@@ -569,17 +652,37 @@ void NativeWorld::Diagnostics(std::ostream& out) const {
             }
             out<<"]";
         }
-        if(r.state.kind==vc::EntityKind::Object) {auto* object=static_cast<CObject*>(r.pointer);out<<",\"visible\":"<<object->bIsVisible<<",\"collision\":"<<object->bUsesCollision<<",\"damaged\":"<<object->bRenderDamaged<<",\"damageEffect\":"<<unsigned(object->m_nCollisionDamageEffect)<<",\"flags\":"<<unsigned(r.state.object.flags);}
+        if(r.state.kind==vc::EntityKind::Object) {
+            auto* object=static_cast<CObject*>(r.pointer);unsigned copies=0,dummies=0;
+            auto* op=CPools::GetObjectPool();for(int i=0;i<op->GetSize();++i) if(auto* o=op->GetSlot(i)) if(o->GetModelIndex()==r.state.model && Distance(Wire(o->m_objectMatrix.GetPosition()),r.state.origin)<.01f) ++copies;
+            auto* dp=CPools::GetDummyPool();for(int i=0;i<dp->GetSize();++i) if(auto* d=dp->GetSlot(i)) if(d->GetModelIndex()==r.state.model && Distance(Wire(d->GetPosition()),r.state.origin)<.01f) ++dummies;
+            auto origin=r.state.origin;
+            out<<",\"origin\":["<<origin.x<<","<<origin.y<<","<<origin.z<<"],\"mapCopies\":"<<copies<<",\"dummyCopies\":"<<dummies<<",\"visible\":"<<object->bIsVisible<<",\"collision\":"<<object->bUsesCollision<<",\"damaged\":"<<object->bRenderDamaged<<",\"damageEffect\":"<<unsigned(object->m_nCollisionDamageEffect)<<",\"flags\":"<<unsigned(r.state.object.flags);
+        }
         out<<"}";
     }
     out<<"]";
 }
 CVehicle* NativeWorld::SpawnTestVehicle(int model,float x,float y,float z) {
-    if(!PopulationOwner() || !InWorld({x,y,z})) return nullptr;
+    if(!PopulationOwner() || !InWorld({x,y,z}) || model<130 || model>236) return nullptr;
     CStreaming::RequestModel(model,STREAMFLAGS_DONT_REMOVE);CStreaming::LoadAllRequestedModels(false);
     if(!CStreaming::HasModelLoaded(model)) return nullptr;
-    auto* v=NewVehicle(model);if(!v) return nullptr;v->SetPosition(CVector(x,y,z));CWorld::Add(v);v->SetStatus(STATUS_ABANDONED);v->bIsLocked=false;
-    if(v->IsCar()) static_cast<CAutomobile*>(v)->PlaceOnRoadProperly();return v;
+    CStreaming::LoadSceneCollision(CVector(x,y,z));bool found=false;
+    float ground=CWorld::FindGroundZFor3DCoord(x,y,z+4,&found);
+    if(!found || std::abs(ground-z)>5) return nullptr;
+    auto* v=NewVehicle(model);if(!v) return nullptr;
+    v->SetPosition(CVector(x,y,ground+.8f));
+    if(v->IsCar()) static_cast<CAutomobile*>(v)->PlaceOnRoadProperly();
+    const auto& box=v->GetColModel()->boundingBox;
+    const int nx=std::clamp(int(std::ceil((box.max.x-box.min.x)/.5f)),1,16);
+    const int ny=std::clamp(int(std::ceil((box.max.y-box.min.y)/.5f)),1,24);
+    // Test a grid through the actual model's cabin/footprint before adding it to
+    // the world. A test car must never begin intersecting a building or vehicle.
+    for(int ix=0;ix<=nx;++ix) for(int iy=0;iy<=ny;++iy) for(float height:{.45f,.8f}) {
+        CVector local(std::lerp(box.min.x,box.max.x,float(ix)/nx),std::lerp(box.min.y,box.max.y,float(iy)/ny),std::lerp(box.min.z,box.max.z,height));
+        if(CWorld::TestSphereAgainstWorld(v->GetMatrix()*local,.25f,v,true,true,false,true,false,false)) {delete v;return nullptr;}
+    }
+    v->SetStatus(STATUS_ABANDONED);v->bIsLocked=false;CWorld::Add(v);return v;
 }
 bool NativeWorld::TestVehiclePose(uint32_t id,float x,float y,float z,float heading) {
     auto* e=Pointer(id);if(!e || !e->IsVehicle() || !Owns(e) || !InWorld({x,y,z}) || !std::isfinite(heading)) return false;
@@ -588,7 +691,7 @@ bool NativeWorld::TestVehiclePose(uint32_t id,float x,float y,float z,float head
     v->GetMatrix().UpdateRW();v->UpdateRwFrame();v->Add();return true;
 }
 bool NativeWorld::TestEnter(uint32_t id,unsigned seat,bool warp) {
-    auto* e=Pointer(id);auto* p=FindPlayerPed();if(!e || !e->IsVehicle() || !p || seat>8) return false;
+    auto* e=Pointer(id);auto* p=LocalPlayer();if(!e || !e->IsVehicle() || !p || seat>8) return false;
     auto* v=static_cast<CVehicle*>(e);
     if(warp) {if(seat==0 && !Owns(v)) return false;vc::PlayerState s;s.vehicle=id;s.flags=vc::kReady|vc::kInVehicle;s.seat=uint8_t(seat);s.door=uint8_t(DoorForSeat(seat));s.pedState=PED_DRIVING;
         if(p->bInVehicle) Detach(p);
@@ -605,7 +708,7 @@ namespace vccoop {
 bool NativeWorld::BoneState(CPed* p,vc::PlayerState& state) const {
     auto id=Id(p);if(!id || Owns(p)) return false;
     const auto& r=impl_->records.at(id);if(r.state.kind!=vc::EntityKind::Ped) return false;
-    state=r.track.At(double(vc::NowMs())*.001-.1).ped;return true;
+    state=r.track.At(ReplicaTime()-.1).ped;return true;
 }
 void NativeWorld::Projectile(CObject* p) {
     auto& a=*impl_;if(!p || !a.network || Id(p)) return;

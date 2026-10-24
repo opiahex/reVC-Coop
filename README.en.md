@@ -1,7 +1,7 @@
 # reVC-Coop
 
-![Version](https://img.shields.io/badge/version-0.2.2-ff81b7)
-[![Checks](https://img.shields.io/badge/checks-209%20passed-65ded2)](MIGRATION.md)
+![Version](https://img.shields.io/badge/version-0.2.7-ff81b7)
+[![Checks](https://img.shields.io/badge/checks-390%20passed-65ded2)](MIGRATION.md)
 ![GTA Vice City](https://img.shields.io/badge/GTA-Vice%20City-ff81b7)
 [![Licences](https://img.shields.io/badge/license-notices-65ded2)](#base-and-third-party-code)
 
@@ -11,13 +11,13 @@ Cooperative multiplayer for **GTA Vice City**, built directly into the reVC engi
 
 ## Players
 
-Running, jumping, weapon changes, shooting and shot effects. Your teammate has a name tag, health and armour bars, and a weapon icon.
+Running, jumping, weapon changes, shooting and shot effects. Your teammate has a name tag, health and armour bars, a weapon icon and their wanted stars. Each player keeps their own wanted level; NPCs react to aiming, gunfire and hits from both players.
 
 ![A teammate in the shared world — host view](assets/players.png)
 
 ## Vehicles and world
 
-Drive or ride as a passenger. Vehicle movement, wheel rotation and damage are replicated; the shared session includes traffic and pedestrians.
+Drive or ride as a passenger. Vehicle movement, wheel rotation and damage are replicated; the shared session includes traffic and pedestrians. Police helicopters are created by the shared session. Street weapons, ammunition, money, health and armour are collected once and disappear for everyone.
 
 **Host — driving**
 
@@ -68,7 +68,7 @@ For the guest, set `name=Guest`, `host=0`, and `address=` to the host's IP. Keep
 
 This is an early free-roam build. Synchronisation is still being refined, especially vehicle contacts and behaviour under network latency. Story missions, cutscenes and shared progress saving have not been ported yet.
 
-Online play defaults to **60 FPS**. Set `fps_limit` in `vc-coop.ini` to any positive integer, or `0` for no limit, then restart the game. Raise it at your own risk: high frame rates can break Vice City's physics, pedestrian movement and animations.
+Online play defaults to **60 FPS**. Set `fps_limit` in `vc-coop.ini` to any positive integer, or `0` for no limit, then restart the game. Cooperative simulation uses the original 30 Hz cadence independently of rendering. Raise FPS at your own risk: not every effect and gameplay scenario has been verified at high render rates.
 
 Standard ASI/CLEO plugins do not work with this build: the cooperative module is compiled into `reVC.exe`.
 

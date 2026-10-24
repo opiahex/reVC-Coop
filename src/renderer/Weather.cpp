@@ -1,6 +1,7 @@
 #include "common.h"
 
 #include "Weather.h"
+#include "coop/Coop.h"
 
 #include "Camera.h"
 #include "Clock.h"
@@ -142,6 +143,8 @@ void CWeather::Init(void)
 
 void CWeather::Update(void)
 {
+	const bool shared=vccoop::ApplyEnvironment();
+	if (!shared) {
 	if(!CReplay::IsPlayingBack()){
 		float fNewInterpolation = (CClock::GetMinutes() + CClock::GetSeconds()/60.0f)/60.0f;
 		if (fNewInterpolation < InterpolationValue) {
@@ -201,12 +204,14 @@ void CWeather::Update(void)
 			}
 		}
 	}
+	}
 	if (WhenToPlayLightningSound && CTimer::GetTimeInMilliseconds() > WhenToPlayLightningSound) {
 		DMAudio.PlayOneShot(SoundHandle, SOUND_LIGHTNING, LightningDuration);
 		CPad::GetPad(0)->StartShake(40 * LightningDuration + 100, 2 * LightningDuration + 80);
 		WhenToPlayLightningSound = 0;
 	}
 
+	if (!shared) {
 	// Wet roads
 	if (OldWeatherType == WEATHER_RAINY || OldWeatherType == WEATHER_HURRICANE) {
 		if (NewWeatherType == WEATHER_RAINY || NewWeatherType == WEATHER_HURRICANE)
@@ -303,6 +308,7 @@ void CWeather::Update(void)
 	TrafficLightBrightness = Max(Foggyness, TrafficLightBrightness);
 	TrafficLightBrightness = Max(Rain, TrafficLightBrightness);
 
+	}
 	AddRain();
 
 	if ((NewWeatherType == WEATHER_SUNNY || NewWeatherType == WEATHER_EXTRA_SUNNY) &&

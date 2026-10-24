@@ -50,6 +50,8 @@ public:
 	static void Initialise(void);
 	static void Shutdown(void);
 	static void Update(void);
+	static void UpdateFixedStep(void);
+	static void SyncRenderClock(void);
 	static void Suspend(void);
 	static void Resume(void);
 	static uint32 GetCyclesPerMillisecond(void);

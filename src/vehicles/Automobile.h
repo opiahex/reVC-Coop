@@ -137,7 +137,7 @@ public:
 	void SetBusDoorTimer(uint32 timer, uint8 type);
 	void ProcessAutoBusDoors(void);
 	void ProcessSwingingDoor(int32 component, eDoors door);
-	void SetupDamageAfterLoad(void);
+	void SetupDamageAfterLoad(bool noFlyingComponents = false);
 	CObject *SpawnFlyingComponent(int32 component, uint32 type);
 	CObject *RemoveBonnetInPedCollision(void);
 	void SetPanelDamage(int32 component, ePanels panel, bool noFlyingComponents = false);

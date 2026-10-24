@@ -1,5 +1,6 @@
-#include "coop/Coop.h"
 #include "common.h"
+#include "coop/Coop.h"
+#include "Pools.h"
 #include "main.h"
 
 #include "General.h"
@@ -124,6 +125,7 @@ static int PathPoint;
 void
 CHeli::ProcessControl(void)
 {
+    if(vccoop::Active()) m_fRotorRotation=fmodf(m_fRotorRotation+(3.14f/6.5f)*(CTimer::GetTimeStepInSeconds()*30.f),6.28f);
 	int i;
 
 	if(gbModelViewer)
@@ -571,7 +573,7 @@ CHeli::Render(void)
 	mat.Translate(pos);
 	mat.UpdateRW();
 
-	m_fRotorRotation += 3.14f/6.5f;
+	if(!vccoop::Active()) m_fRotorRotation += 3.14f/6.5f;
 	if(m_fRotorRotation > 6.28f)
 		m_fRotorRotation -= 6.28f;
 
@@ -812,6 +814,8 @@ CHeli::GenerateHeli(bool catalina)
 void
 CHeli::UpdateHelis(void)
 {
+    if(!vccoop::PoliceOwner()) return;
+    vccoop::NpcPlayerScope playerContext(vccoop::PoliceTarget(),vccoop::PoliceTarget());
 	int i, j;
 
 	// Spawn new police helis
@@ -820,6 +824,7 @@ CHeli::UpdateHelis(void)
 		CReplay::IsPlayingBack() ? 0 :
 #endif
 		FindPlayerPed()->m_pWanted->NumOfHelisRequired();
+	if(vccoop::Active() && numHelisRequired>0) CStreaming::RequestModel(MI_CHOPPER,STREAMFLAGS_DEPENDENCY);
 	if(CCullZones::PlayerNoRain() || CGame::IsInInterior())
 		numHelisRequired = 0;
 	if(CStreaming::HasModelLoaded(MI_CHOPPER) && CTimer::GetTimeInMilliseconds() > TestForNewRandomHelisTimer){
@@ -952,6 +957,10 @@ CHeli::UpdateHelis(void)
 void
 CHeli::SpecialHeliPreRender(void)
 {
+    if(vccoop::Active()) {
+        auto* pool=CPools::GetVehiclePool();
+        for(int n=0;n<pool->GetSize();++n) {auto* v=pool->GetSlot(n);if(v && v->IsHeli() && vccoop::RemoteVehicle(v)) static_cast<CHeli*>(v)->PreRenderAlways();}
+    }
 	int i;
 	for(i = 0; i < NUM_HELIS; i++)
 		if(pHelis[i])

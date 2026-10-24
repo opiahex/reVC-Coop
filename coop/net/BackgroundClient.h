@@ -15,8 +15,12 @@ public:
         std::string error;
         std::deque<ChatLine> chats;
         std::map<uint32_t,RemoteEntity> entities;
+        std::map<uint32_t,Pickup> pickups;
         std::array<RemoteRadar,kRadarSlots> radar{};
         MissionState mission; CutsceneVote vote; bool hasMission{};
+        bool clockReady{};uint64_t clockSamples{},clockRtt{};double clockOffset{};
+        Environment environment;bool hasEnvironment{};
+        TransportStats transport;
     };
     ~BackgroundClient() { Stop(); }
     bool Start();

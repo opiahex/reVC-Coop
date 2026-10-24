@@ -1956,7 +1956,11 @@ CWorld::Process(void)
 				else {
 					if (!movingEnt->bOffscreen)
 						movingEnt->bOffscreen = !movingEnt->GetIsOnScreen();
-					RpAnimBlendClumpUpdateAnimations(movingEnt->GetClump(), CTimer::GetTimeStepInSeconds(), !movingEnt->bOffscreen);
+					// The owner's offscreen NPC can be visible to another player.
+					// Evaluate its actual bones before publishing the network pose.
+					const bool sharedPose=vccoop::Active() && movingEnt->IsPed() && !vccoop::ReplicaPed(static_cast<CPed*>(movingEnt));
+					RpAnimBlendClumpUpdateAnimations(movingEnt->GetClump(), CTimer::GetTimeStepInSeconds(), !movingEnt->bOffscreen || sharedPose);
+					if(sharedPose && movingEnt->bOffscreen) movingEnt->UpdateRpHAnim();
 				}
 			}
 		}
@@ -1965,7 +1969,7 @@ CWorld::Process(void)
 			if(movingEnt->bRemoveFromWorld) {
 				RemoveEntityInsteadOfProcessingIt(movingEnt);
 			} else {
-				if (!vccoop::HoldReplica(movingEnt)) movingEnt->ProcessControl();
+				if (!vccoop::HoldReplica(movingEnt)) { vccoop::NpcPlayerScope context(movingEnt); movingEnt->ProcessControl(); }
                 else { movingEnt->bIsInSafePosition=true; movingEnt->bWasPostponed=false; }
 				if(movingEnt->GetIsStatic()) { movingEnt->RemoveFromMovingList(); }
 			}
@@ -1977,7 +1981,7 @@ CWorld::Process(void)
 				if(movingEnt->bRemoveFromWorld) {
 					RemoveEntityInsteadOfProcessingIt(movingEnt);
 				} else {
-					if (!vccoop::HoldReplica(movingEnt)) movingEnt->ProcessControl();
+					if (!vccoop::HoldReplica(movingEnt)) { vccoop::NpcPlayerScope context(movingEnt); movingEnt->ProcessControl(); }
                 else { movingEnt->bIsInSafePosition=true; movingEnt->bWasPostponed=false; }
 					if(movingEnt->GetIsStatic()) { movingEnt->RemoveFromMovingList(); }
 				}

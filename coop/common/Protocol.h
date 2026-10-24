@@ -1,6 +1,8 @@
 #pragma once
 #include "Mission.h"
 #include "Radar.h"
+#include "NetworkClock.h"
+#include "Environment.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -12,22 +14,43 @@
 
 namespace vc {
 inline constexpr uint32_t kMagic = 0x50434356; // VCCP, little endian
-inline constexpr uint16_t kProtocol = 15;
+inline constexpr uint16_t kProtocol = 20;
 inline constexpr uint8_t kMaxPlayers = 3, kNoPlayer = 255;
-inline constexpr size_t kChannels = 1 + kMaxPlayers, kMaxPacket = 512;
+inline constexpr size_t kClockChannel = 1 + kMaxPlayers, kChannels = kClockChannel + 1, kMaxPacket = 768;
 inline constexpr uint8_t kReady = 1, kInVehicle = 2, kDead = 4;
 inline constexpr size_t kAnimationLayers = 6;
 inline constexpr size_t kMaxEntities = 192, kMaxWorldObjects = 64;
 enum class Kind : uint8_t { Hello = 1, Welcome, Joined, Left, State, Rejected, Chat, Hit, Shot,
-    EntityCreate,EntityUpdate,EntityRemove,EntityClaim,EntityAuthority,EntityHit,SeatRequest,SeatGrant,VehicleContact,Population,Transition,MissionState,MissionCommand,MissionBarrier,MissionReady,MissionRelease,MissionVote,MissionVoteState,Radar,Explosion };
+    EntityCreate,EntityUpdate,EntityRemove,EntityClaim,EntityAuthority,EntityHit,SeatRequest,SeatGrant,VehicleContact,Population,Transition,MissionState,MissionCommand,MissionBarrier,MissionReady,MissionRelease,MissionVote,MissionVoteState,Radar,Explosion,ClockRequest,ClockReply,Environment,Crime,PickupCreate,PickupState,PickupRemove,PickupRequest,PickupGrant };
 enum class Reason : uint8_t { None, Protocol, Full, RateLimit, Timeout, MissionBusy, MissionTimeout, MissionHostLeft };
 struct Vec3 { float x{}, y{}, z{}; };
+inline constexpr size_t kMaxPickups=512;
+struct Pickup {
+    uint32_t id{},revision{1},key{},creatorEpoch{},quantity{},remaining{},source{},sourceGeneration{};
+    uint8_t creator{kNoPlayer},type{},area{},flags{},status{},takenBy{kNoPlayer};
+    uint16_t model{},rate{};Vec3 position{};
+};
+inline bool SharedPickupType(uint8_t t) {return t==2 || t==3 || t==4 || t==5 || t==6 || t==8 || t==15;}
+inline bool PickupModel(uint16_t m) {return (m>=259 && m<=291) || m==335 || m==337 || (m>=366 && m<=368) || m==375 || m==410;}
+inline bool ValidPickup(const Pickup& p) {
+    return bool(p.source)==bool(p.sourceGeneration) && SharedPickupType(p.type) && PickupModel(p.model) && p.revision && p.quantity<=1000000 && p.remaining<=720000
+        && p.area<=32 && p.flags<=3 && p.status<=3 && (p.takenBy<kMaxPlayers || p.takenBy==kNoPlayer)
+        && (p.creator<kMaxPlayers || p.creator==kNoPlayer)
+        && std::isfinite(p.position.x) && std::abs(p.position.x)<=20000 && std::isfinite(p.position.y) && std::abs(p.position.y)<=20000 && std::isfinite(p.position.z) && std::abs(p.position.z)<=10000;
+}
+inline bool PickupRespawnBlocked(const Pickup& p,Vec3 position,uint8_t area) {
+    if(p.area!=13 && p.area!=area) return false;
+    const float dx=position.x-p.position.x,dy=position.y-p.position.y;
+    return dx*dx+dy*dy<100;
+}
 struct Quaternion { float x{},y{},z{},w{1}; };
-inline constexpr std::array<uint32_t,6> kAimBoneTags{5,3,22,24,32,34};
+inline constexpr std::array<uint32_t,22> kPoseBoneTags{0,1,2,3,4,5,21,22,23,24,25,31,32,33,34,35,41,42,43,51,52,53};
+inline constexpr uint32_t kPoseMask=(1u<<kPoseBoneTags.size())-1;
 struct Animation {
     uint16_t group{},id{},flags{};
-    float time{},speed{1},blend{};
+    float time{},speed{1},blend{},duration{};
 };
+inline constexpr uint8_t kAiming=1,kPointing=2,kDucking=4,kAttacking=8;
 struct PlayerState {
     Vec3 position{}, velocity{}; // metres; velocity is metres/second
     float heading{}, health{100}, armour{};
@@ -38,8 +61,12 @@ struct PlayerState {
     uint8_t weapon{},weaponState{},seat{255},animationCount{},door{};
     uint16_t vehicleAnimation{65535};
     uint32_t ammo{},clip{};
-    uint8_t boneMask{};
-    std::array<Quaternion,kAimBoneTags.size()> bones{};
+    uint8_t actions{},wanted{},wantedCops{},wantedCars{},wantedRoadblocks{},wantedIgnored{},aimKind{}; // 0: direction, 1: player, 2: world entity
+    uint32_t aimTarget{},aimGeneration{},aimLife{};
+    Vec3 aimDirection{0,1,0},aimOffset{0,0,.65f};
+    uint32_t boneMask{};
+    std::array<Quaternion,kPoseBoneTags.size()> bones{};
+    std::array<Vec3,kPoseBoneTags.size()> bonePositions{};
     std::array<Animation,kAnimationLayers> animations{};
 };
 struct Hit {
@@ -55,6 +82,12 @@ struct Shot {
 };
 struct Explosion {
     Vec3 position{}; uint32_t source{},generation{},life{1},delay{}; uint8_t type{},sound{1};
+};
+// AI authority reports a witnessed crime to the participant who owns the wanted state.
+struct Crime {
+    uint8_t target{kNoPlayer},type{},flags{},minimum{};
+    uint32_t epoch{},life{},witness{},generation{},id{};
+    Vec3 position{};
 };
 struct Contact {
     uint32_t source{},sourceGeneration{},target{},targetGeneration{};
@@ -74,9 +107,9 @@ struct VehicleState {
     uint32_t panels{},lights{};
     std::array<float,6> doorAngles{};
     std::array<float,4> wheelAngle{},wheelOmega{},wheelPosition{},suspension{1,1,1,1};
-    float wheelSteer{},bikeLean{};
+    float wheelSteer{},bikeLean{},rotor{},searchX{},searchY{},searchIntensity{};uint8_t heliStatus{};
 };
-struct ObjectState { Transform transform; uint8_t flags{1}; }; // visible, collision, broken glass/explosion
+struct ObjectState { Transform transform; Vec3 turn{}; uint8_t flags{1}; }; // visible, collision, broken glass/explosion
 struct Entity {
     uint32_t id{},key{},generation{1},ownerEpoch{},creatorEpoch{};
     uint8_t owner{kNoPlayer},creator{kNoPlayer},area{};
@@ -90,7 +123,10 @@ struct Message {
     Kind kind{Kind::Hello};
     uint8_t sender{kNoPlayer}, id{kNoPlayer}, host{kNoPlayer};
     uint32_t sequence{},epoch{};
-    uint16_t sampleAgeMs{}; // producer-to-transport staging age, not a remote clock
+    uint16_t sampleAgeMs{}; // producer-to-transport staging age
+    uint64_t sampleTimeMs{}; // capture time on the synchronized server timeline; 0 until synchronized
+    uint64_t clockClientMs{},clockServerInMs{},clockServerOutMs{};
+    Environment environment;
     uint8_t population{};
     Reason reason{Reason::None};
     std::string name;
@@ -99,6 +135,8 @@ struct Message {
     Hit hit{};
     Shot shot{};
     Contact contact;
+    Crime crime;
+    Pickup pickup;
     Explosion explosion;
     Entity entity;
     MissionState mission;
@@ -133,19 +171,29 @@ inline bool ValidState(const PlayerState& s) {
         && finite(s.heading,1000) && finite(s.health,10000) && s.health >= 0
         && finite(s.armour,10000) && s.armour >= 0 && s.model <= 300
         && s.pedType<=31 && s.move <= 7 && s.area <= 32 && s.flags <= 7 && s.hour < 24 && s.minute < 60 && s.weather <= 6 && s.oldWeather<=6 && s.second<60
-        && s.life && s.pedState<=64 && s.weapon<=36 && s.weaponState<=4 && s.ammo<=1000000 && s.clip<=1000000 && s.boneMask<64
+        && s.life && s.pedState<=64 && s.weapon<=36 && s.weaponState<=4 && s.ammo<=1000000 && s.clip<=1000000 && !(s.boneMask&~kPoseMask)
         && (s.seat==255 || s.seat<=8) && s.door<20 && (s.vehicleAnimation==65535 || s.vehicleAnimation<512) && s.animationCount<=kAnimationLayers)) return false;
+    const auto d=s.aimDirection;const float length=d.x*d.x+d.y*d.y+d.z*d.z;
+    if(s.actions>15 || s.wanted>6 || s.wantedCops>10 || s.wantedCars>3 || s.wantedRoadblocks>30 || s.wantedIgnored>3 || s.aimKind>2 || !finite(s.aimOffset.x,8) || !finite(s.aimOffset.y,8) || !finite(s.aimOffset.z,8) || !finite(d.x,1.001f) || !finite(d.y,1.001f) || !finite(d.z,1.001f) || std::abs(length-1)>.025f) return false;
+    if(s.aimKind==0 ? (s.aimTarget || s.aimGeneration || s.aimLife) : (!s.aimGeneration || (s.aimKind==1 ? (s.aimTarget>=kMaxPlayers || !s.aimLife) : (!s.aimTarget || s.aimLife)))) return false;
     for(size_t i=0;i<s.bones.size();++i) if(s.boneMask&(1u<<i)) {
         auto q=s.bones[i]; const float length=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
         if(!finite(q.x,1.001f) || !finite(q.y,1.001f) || !finite(q.z,1.001f) || !finite(q.w,1.001f) || std::abs(length-1)>.025f) return false;
+        const auto p=s.bonePositions[i];if(!finite(p.x,8) || !finite(p.y,8) || !finite(p.z,8)) return false;
     }
     for (size_t i=0;i<s.animationCount;++i) {
         const auto& a=s.animations[i];
         if (a.group>=61 || a.id>=512 || (a.flags&~0x3FF3u) || !finite(a.time,600) || a.time<0
-            || !finite(a.speed,10) || a.speed<0 || !finite(a.blend,1) || a.blend<0) return false;
+            || !finite(a.speed,10) || a.speed<0 || !finite(a.blend,1) || a.blend<0 || !finite(a.duration,600) || a.duration<0) return false;
         for (size_t j=0;j<i;++j) if (s.animations[j].group==a.group && s.animations[j].id==a.id) return false;
     }
     return true;
+}
+inline bool ValidCrime(const Crime& c) {
+    return c.target<kMaxPlayers && c.epoch && c.life && c.type<20 && c.flags<=3 && c.minimum<=2
+        && (c.type || c.minimum) && bool(c.witness)==bool(c.generation)
+        && std::isfinite(c.position.x) && std::isfinite(c.position.y) && std::isfinite(c.position.z)
+        && std::abs(c.position.x)<=20000 && std::abs(c.position.y)<=20000 && std::abs(c.position.z)<=10000;
 }
 inline bool ValidHit(const Hit& h) {
     return h.target<kMaxPlayers && h.targetEpoch && h.life && h.weapon<=47 && h.piece<=6 && h.direction<=3
@@ -193,6 +241,7 @@ inline bool ValidEntity(const Entity& e) {
     if(e.kind==EntityKind::Object) return e.model<6500 && ValidTransform(e.object.transform) && e.object.flags<=127;
     if(e.kind!=EntityKind::Vehicle || e.model<130 || e.model>236) return false;
     const auto& v=e.vehicle;
+    if(!std::isfinite(v.rotor) || std::abs(v.rotor)>7 || !std::isfinite(v.searchX) || std::abs(v.searchX)>20000 || !std::isfinite(v.searchY) || std::abs(v.searchY)>20000 || !std::isfinite(v.searchIntensity) || v.searchIntensity<0 || v.searchIntensity>1 || v.heliStatus>5) return false;
     if(!ValidTransform(v.transform) || !ValidPoint(v.turn,50) || !std::isfinite(v.health) || v.health<0 || v.health>10000
         || !std::isfinite(v.steer) || std::abs(v.steer)>2 || !std::isfinite(v.gas) || std::abs(v.gas)>1.1f
         || !std::isfinite(v.brake) || v.brake<0 || v.brake>1.1f || v.type>5 || v.type==2 || v.gear>10 || v.flags>15 || v.passengers>8
@@ -213,17 +262,26 @@ struct Writer {
     void U8(uint8_t x) { bytes.push_back(x); }
     void U16(uint16_t x) { U8(uint8_t(x)); U8(uint8_t(x >> 8)); }
     void U32(uint32_t x) { U16(uint16_t(x)); U16(uint16_t(x >> 16)); }
+    void U64(uint64_t x) { U32(uint32_t(x)); U32(uint32_t(x >> 32)); }
     void F32(float x) { U32(std::bit_cast<uint32_t>(x)); }
+    void Fixed(float x,float scale,float maximum) {
+        U16(!std::isfinite(x) || std::abs(x)>maximum ? 0x8000 : uint16_t(int16_t(std::lround(x*scale))));
+    }
     void String(const std::string& x) { U8(uint8_t(x.size())); bytes.insert(bytes.end(),x.begin(),x.end()); }
     void Vector(Vec3 v) { F32(v.x); F32(v.y); F32(v.z); }
     void Player(const PlayerState& s) {
         Vector(s.position); Vector(s.velocity); F32(s.heading); F32(s.health); F32(s.armour); U16(s.model);
         for(uint8_t b:{s.pedType,s.move,s.area,s.flags,s.hour,s.minute,s.weather,s.second,s.oldWeather}) U8(b);
-        U32(s.life); U32(s.vehicle); U16(s.pedState); U8(s.weapon); U8(s.weaponState); U8(s.seat); U8(s.door); U16(s.vehicleAnimation); U32(s.ammo); U32(s.clip); U8(s.boneMask);
-        for(size_t i=0;i<s.bones.size();++i) if(s.boneMask&(1u<<i)) { auto q=s.bones[i]; F32(q.x); F32(q.y); F32(q.z); F32(q.w); }
+        U32(s.life); U32(s.vehicle); U16(s.pedState); U8(s.weapon); U8(s.weaponState); U8(s.seat); U8(s.door); U16(s.vehicleAnimation); U32(s.ammo); U32(s.clip);
+        U8(s.actions);U8(s.wanted);U8(s.wantedCops);U8(s.wantedCars);U8(s.wantedRoadblocks);U8(s.wantedIgnored);U8(s.aimKind);U32(s.aimTarget);U32(s.aimGeneration);U32(s.aimLife);Vector(s.aimDirection);Vector(s.aimOffset);
+        U32(s.boneMask);
+        for(size_t i=0;i<s.bones.size();++i) if(s.boneMask&(1u<<i)) {
+            auto q=s.bones[i];for(float x:{q.x,q.y,q.z,q.w}) Fixed(x,32767.f,1.f);
+            auto p=s.bonePositions[i];for(float x:{p.x,p.y,p.z}) Fixed(x,2048.f,8.f);
+        }
         U8(s.animationCount);
         for(size_t i=0;i<std::min(size_t(s.animationCount),kAnimationLayers);++i) {
-            const auto& a=s.animations[i]; U16(a.group); U16(a.id); U16(a.flags); F32(a.time); F32(a.speed); F32(a.blend);
+            const auto& a=s.animations[i]; U16(a.group); U16(a.id); U16(a.flags); F32(a.time); F32(a.speed); F32(a.blend);F32(a.duration);
         }
     }
     void Matrix(const Transform& t) { Vector(t.position); Vector(t.velocity); Vector(t.right); Vector(t.forward); Vector(t.up); }
@@ -240,7 +298,7 @@ struct Writer {
             U32(v.panels); U32(v.lights);
             for(auto angle:v.doorAngles) F32(angle);
             for(size_t i=0;i<4;++i) { F32(v.wheelAngle[i]); F32(v.wheelOmega[i]); F32(v.wheelPosition[i]); F32(v.suspension[i]); }
-            F32(v.wheelSteer);F32(v.bikeLean);
+            F32(v.wheelSteer);F32(v.bikeLean);F32(v.rotor);F32(v.searchX);F32(v.searchY);F32(v.searchIntensity);U8(v.heliStatus);
         }
     }
 };
@@ -248,8 +306,10 @@ struct Reader {
     std::span<const uint8_t> bytes; size_t pos{}; bool ok{true};
     uint8_t U8() { if (pos >= bytes.size()) { ok=false; return 0; } return bytes[pos++]; }
     uint16_t U16() { uint16_t a=U8(); return uint16_t(a | uint16_t(U8())<<8); }
+    uint64_t U64() {auto low=U32();return uint64_t(low)|(uint64_t(U32())<<32);}
     uint32_t U32() { uint32_t a=U16(); return a | uint32_t(U16())<<16; }
     float F32() { return std::bit_cast<float>(U32()); }
+    float Fixed(float scale) {auto value=std::bit_cast<int16_t>(U16());if(value==INT16_MIN) ok=false;return float(value)/scale;}
     Vec3 Vector() { float x=F32(), y=F32(), z=F32(); return {x,y,z}; }
     std::string String() {
         size_t n=U8(); if (!ok || n > bytes.size()-pos) { ok=false; return {}; }
@@ -258,13 +318,16 @@ struct Reader {
     PlayerState Player() {
         PlayerState s; s.position=Vector(); s.velocity=Vector(); s.heading=F32(); s.health=F32(); s.armour=F32(); s.model=U16();
         s.pedType=U8(); s.move=U8(); s.area=U8(); s.flags=U8(); s.hour=U8(); s.minute=U8(); s.weather=U8(); s.second=U8(); s.oldWeather=U8();
-        s.life=U32(); s.vehicle=U32(); s.pedState=U16(); s.weapon=U8(); s.weaponState=U8(); s.seat=U8(); s.door=U8(); s.vehicleAnimation=U16(); s.ammo=U32(); s.clip=U32(); s.boneMask=U8();
-        if(s.boneMask>=64) { ok=false; return s; }
-        for(size_t i=0;i<s.bones.size();++i) if(s.boneMask&(1u<<i)) { const float x=F32(),y=F32(),z=F32(),w=F32(); s.bones[i]={x,y,z,w}; }
+        s.life=U32(); s.vehicle=U32(); s.pedState=U16(); s.weapon=U8(); s.weaponState=U8(); s.seat=U8(); s.door=U8(); s.vehicleAnimation=U16(); s.ammo=U32(); s.clip=U32(); s.actions=U8();s.wanted=U8();s.wantedCops=U8();s.wantedCars=U8();s.wantedRoadblocks=U8();s.wantedIgnored=U8();s.aimKind=U8();s.aimTarget=U32();s.aimGeneration=U32();s.aimLife=U32();s.aimDirection=Vector();s.aimOffset=Vector();s.boneMask=U32();
+        if(s.boneMask&~kPoseMask) { ok=false; return s; }
+        for(size_t i=0;i<s.bones.size();++i) if(s.boneMask&(1u<<i)) {
+            const float x=Fixed(32767.f),y=Fixed(32767.f),z=Fixed(32767.f),w=Fixed(32767.f);s.bones[i]={x,y,z,w};
+            const float tx=Fixed(2048.f),ty=Fixed(2048.f),tz=Fixed(2048.f);s.bonePositions[i]={tx,ty,tz};
+        }
         s.animationCount=U8();
         if(s.animationCount>kAnimationLayers) { ok=false; return s; }
         for(size_t i=0;i<s.animationCount;++i) {
-            auto& a=s.animations[i]; a.group=U16(); a.id=U16(); a.flags=U16(); a.time=F32(); a.speed=F32(); a.blend=F32();
+            auto& a=s.animations[i]; a.group=U16(); a.id=U16(); a.flags=U16(); a.time=F32(); a.speed=F32(); a.blend=F32();a.duration=F32();
         }
         return s;
     }
@@ -281,7 +344,7 @@ struct Reader {
             for(auto& b:v.wheels) b=U8();
             v.panels=U32(); v.lights=U32();             for(auto& angle:v.doorAngles) angle=F32();
             for(size_t i=0;i<4;++i) { v.wheelAngle[i]=F32(); v.wheelOmega[i]=F32(); v.wheelPosition[i]=F32(); v.suspension[i]=F32(); }
-            v.wheelSteer=F32();v.bikeLean=F32();
+            v.wheelSteer=F32();v.bikeLean=F32();v.rotor=F32();v.searchX=F32();v.searchY=F32();v.searchIntensity=F32();v.heliStatus=U8();
         } else ok=false;
         return e;
     }
@@ -289,6 +352,24 @@ struct Reader {
 inline std::vector<uint8_t> Encode(const Message& m) {
     Writer w; w.U32(kMagic); w.U16(kProtocol); w.U8(uint8_t(m.kind)); w.U8(m.sender); w.U32(m.sequence); w.U32(m.epoch);
     switch (m.kind) {
+        case Kind::Environment: {
+            const auto& e=m.environment;
+            for(auto b:{e.hour,e.minute,e.second,e.oldWeather,e.weather,e.flags,e.thunderDuration}) w.U8(b);
+            w.U16(uint16_t(e.forcedWeather));w.U32(e.thunderSerial);w.U32(e.minuteLength);w.U16(e.thunderDelay);
+            for(auto v:e.values) w.F32(v);break;
+        }
+        case Kind::PickupCreate:case Kind::PickupState:case Kind::PickupGrant: {
+            const auto& p=m.pickup;w.U32(p.id);w.U32(p.revision);w.U32(p.key);w.U32(p.creatorEpoch);w.U32(p.quantity);w.U32(p.remaining);w.U32(p.source);w.U32(p.sourceGeneration);
+            for(auto b:{p.creator,p.type,p.area,p.flags,p.status,p.takenBy}) w.U8(b);
+            w.U16(p.model);w.U16(p.rate);w.Vector(p.position);w.U8(m.id);w.U32(m.hit.targetEpoch);w.U32(m.hit.life);break;
+        }
+        case Kind::PickupRequest:case Kind::PickupRemove: w.U32(m.pickup.id);w.U32(m.pickup.revision);w.U8(m.id);w.U32(m.hit.life);break;
+        case Kind::Crime: {
+            const auto& c=m.crime;w.U8(c.target);w.U8(c.type);w.U8(c.flags);w.U8(c.minimum);
+            w.U32(c.epoch);w.U32(c.life);w.U32(c.witness);w.U32(c.generation);w.U32(c.id);w.Vector(c.position);break;
+        }
+        case Kind::ClockRequest: w.U64(m.clockClientMs);break;
+        case Kind::ClockReply: w.U64(m.clockClientMs);w.U64(m.clockServerInMs);w.U64(m.clockServerOutMs);break;
         case Kind::Hello: w.String(m.name); break;
         case Kind::Welcome: w.U8(m.id); w.U8(m.host); break;
         case Kind::Joined: w.U8(m.id); w.String(m.name); break;
@@ -300,7 +381,7 @@ inline std::vector<uint8_t> Encode(const Message& m) {
             w.U8(h.weapon); w.U8(h.piece); w.U8(h.direction); w.F32(h.damage); w.U32(h.source); w.U32(h.sourceGeneration); w.U32(h.sourceLife); break;
         }
         case Kind::Shot: w.Vector(m.shot.start); w.Vector(m.shot.end); w.U8(m.shot.weapon); w.U32(m.shot.source); w.U32(m.shot.sourceGeneration); w.Vector(m.shot.normal); w.U8(m.shot.flags); w.U8(m.shot.surface); w.U32(m.shot.sourceLife); w.Vector(m.shot.localMuzzle); w.U8(m.shot.impactKind); w.U8(m.shot.impactPiece); break;
-        case Kind::EntityCreate: case Kind::EntityUpdate: case Kind::EntityAuthority: w.World(m.entity); if(m.kind==Kind::EntityUpdate) w.U16(m.sampleAgeMs); break;
+        case Kind::EntityCreate: case Kind::EntityUpdate: case Kind::EntityAuthority: w.World(m.entity); if(m.kind==Kind::EntityUpdate) {w.U16(m.sampleAgeMs);w.U64(m.sampleTimeMs);} break;
         case Kind::EntityRemove: case Kind::EntityClaim: w.U32(m.entity.id); w.U32(m.entity.generation); break;
         case Kind::SeatRequest: case Kind::SeatGrant: w.U32(m.entity.id); w.U32(m.entity.generation); w.U8(m.id); w.U8(m.host); break;
         case Kind::EntityHit: w.U32(m.entity.id); w.U32(m.entity.generation); w.F32(m.hit.damage); w.U8(m.hit.weapon); w.U8(m.hit.piece); w.U8(m.hit.direction); w.U32(m.hit.source); w.U32(m.hit.sourceGeneration); w.U32(m.hit.sourceLife); break;
@@ -330,7 +411,7 @@ inline std::vector<uint8_t> Encode(const Message& m) {
         case Kind::MissionVote: w.U8(m.id); break;
         case Kind::MissionVoteState: w.U32(m.vote.scene); w.U8(m.vote.members); w.U8(m.vote.yes); w.U8(m.vote.open); w.U8(m.vote.declined); w.U8(m.vote.passed); break;
         case Kind::Transition: case Kind::State: {
-            w.Player(m.state);
+            w.Player(m.state);w.U16(m.sampleAgeMs);w.U64(m.sampleTimeMs);
             break;
         }
     }
@@ -342,7 +423,28 @@ inline bool Decode(std::span<const uint8_t> bytes, Message& output) {
     if (r.U32()!=kMagic || r.U16()!=kProtocol) return false;
     m.kind=Kind(r.U8()); m.sender=r.U8(); m.sequence=r.U32(); m.epoch=r.U32();
     switch (m.kind) {
+        case Kind::Environment: {
+            auto& e=m.environment;e.hour=r.U8();e.minute=r.U8();e.second=r.U8();e.oldWeather=r.U8();e.weather=r.U8();e.flags=r.U8();e.thunderDuration=r.U8();
+            e.forcedWeather=int16_t(r.U16());e.thunderSerial=r.U32();e.minuteLength=r.U32();e.thunderDelay=r.U16();
+            for(auto& v:e.values) v=r.F32();if(!m.sequence || !ValidEnvironment(e)) return false;break;
+        }
+        case Kind::PickupCreate:case Kind::PickupState:case Kind::PickupGrant: {
+            auto& p=m.pickup;p.id=r.U32();p.revision=r.U32();p.key=r.U32();p.creatorEpoch=r.U32();p.quantity=r.U32();p.remaining=r.U32();p.source=r.U32();p.sourceGeneration=r.U32();
+            p.creator=r.U8();p.type=r.U8();p.area=r.U8();p.flags=r.U8();p.status=r.U8();p.takenBy=r.U8();p.model=r.U16();p.rate=r.U16();p.position=r.Vector();
+            m.id=r.U8();m.hit.targetEpoch=r.U32();m.hit.life=r.U32();
+            if(!ValidPickup(p) || (m.kind!=Kind::PickupCreate && !p.id) || (m.kind==Kind::PickupGrant && (m.id>1 || !m.hit.targetEpoch || !m.hit.life))) return false;break;
+        }
+        case Kind::PickupRequest:case Kind::PickupRemove:
+            m.pickup.id=r.U32();m.pickup.revision=r.U32();m.id=r.U8();m.hit.life=r.U32();
+            if(!m.pickup.id || !m.pickup.revision || m.id>1 || !m.hit.life) return false;break;
+        case Kind::Crime: {
+            auto& c=m.crime;c.target=r.U8();c.type=r.U8();c.flags=r.U8();c.minimum=r.U8();
+            c.epoch=r.U32();c.life=r.U32();c.witness=r.U32();c.generation=r.U32();c.id=r.U32();c.position=r.Vector();
+            if(!ValidCrime(c)) return false;break;
+        }
         case Kind::Explosion: m.explosion.position=r.Vector();m.explosion.source=r.U32();m.explosion.generation=r.U32();m.explosion.life=r.U32();m.explosion.delay=r.U32();m.explosion.type=r.U8();m.explosion.sound=r.U8();if(!ValidExplosion(m.explosion)) return false;break;
+        case Kind::ClockRequest: m.clockClientMs=r.U64();if(!m.sequence || !m.clockClientMs || m.clockClientMs>kMaxNetworkTime) return false;break;
+        case Kind::ClockReply: m.clockClientMs=r.U64();m.clockServerInMs=r.U64();m.clockServerOutMs=r.U64();if(!m.sequence || !m.clockClientMs || !m.clockServerInMs || m.clockServerInMs>m.clockServerOutMs || m.clockClientMs>kMaxNetworkTime || m.clockServerOutMs>kMaxNetworkTime) return false;break;
         case Kind::Hello: m.name=r.String(); if (!ValidName(m.name)) return false; break;
         case Kind::Welcome: m.id=r.U8(); m.host=r.U8(); if (m.id>=kMaxPlayers || m.host>=kMaxPlayers) return false; break;
         case Kind::Joined: m.id=r.U8(); m.name=r.String(); if (m.id>=kMaxPlayers || !m.epoch || !ValidName(m.name)) return false; break;
@@ -361,7 +463,7 @@ inline bool Decode(std::span<const uint8_t> bytes, Message& output) {
             break;
         }
         case Kind::EntityCreate: case Kind::EntityUpdate: case Kind::EntityAuthority:
-            m.entity=r.World(); if(m.kind==Kind::EntityUpdate) m.sampleAgeMs=r.U16(); if(!ValidEntity(m.entity) || m.sampleAgeMs>250) return false; break;
+            m.entity=r.World(); if(m.kind==Kind::EntityUpdate) {m.sampleAgeMs=r.U16();m.sampleTimeMs=r.U64();} if(!ValidEntity(m.entity) || m.sampleAgeMs>250 || m.sampleTimeMs>kMaxNetworkTime) return false; break;
         case Kind::EntityRemove: case Kind::EntityClaim:
             m.entity.id=r.U32(); m.entity.generation=r.U32(); if(!m.entity.id || !m.entity.generation) return false; break;
         case Kind::SeatRequest: case Kind::SeatGrant:
@@ -400,7 +502,7 @@ inline bool Decode(std::span<const uint8_t> bytes, Message& output) {
         case Kind::MissionVote: m.id=r.U8(); if(m.id>1 || !m.sequence) return false; break;
         case Kind::MissionVoteState: m.vote.scene=r.U32(); m.vote.members=r.U8(); m.vote.yes=r.U8(); m.vote.open=r.U8(); m.vote.declined=r.U8(); m.vote.passed=r.U8(); if(!m.vote.Valid()) return false; break;
         case Kind::Transition: case Kind::State: {
-            m.state=r.Player(); if (!ValidState(m.state)) return false;
+            m.state=r.Player();m.sampleAgeMs=r.U16();m.sampleTimeMs=r.U64(); if (!ValidState(m.state) || m.sampleAgeMs>250 || m.sampleTimeMs>kMaxNetworkTime) return false;
             break;
         }
         default: return false;

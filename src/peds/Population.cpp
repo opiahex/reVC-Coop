@@ -921,15 +921,17 @@ CPopulation::ConvertAllObjectsToDummyObjects()
 	}
 }
 
-void
-CPopulation::ConvertToRealObject(CDummyObject *dummy)
+CObject*
+CPopulation::ConvertToRealObject(CDummyObject *dummy, bool authoritative)
 {
-	if (!TestSafeForRealObject(dummy))
-		return;
+	// A replicated prop replaces this exact map instance before its owner's
+	// pose is applied. Local traffic must not leave a second intact dummy here.
+	if (!authoritative && !TestSafeForRealObject(dummy))
+		return nil;
 
 	CObject *obj = new CObject(dummy);
 	if (!obj)
-		return;
+		return nil;
 
 	CWorld::Remove(dummy);
 	delete dummy;
@@ -944,6 +946,7 @@ CPopulation::ConvertToRealObject(CDummyObject *dummy)
 		obj->bTouchingWater = true;
 		obj->AddToMovingList();
 	}
+	return obj;
 }
 
 void

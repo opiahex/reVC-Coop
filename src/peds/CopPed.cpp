@@ -1,4 +1,5 @@
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "World.h"
 #include "PlayerPed.h"
@@ -155,6 +156,7 @@ CCopPed::SetArrestPlayer(CPed *player)
 void
 CCopPed::ClearPursuit(void)
 {
+    vccoop::NpcPlayerScope suspectContext(this);
 	CPlayerPed *player = FindPlayerPed();
 	if (!player)
 		return;

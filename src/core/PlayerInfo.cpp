@@ -1,4 +1,5 @@
 #include "common.h"
+#include "coop/Coop.h"
 
 #include "Automobile.h"
 #include "Bridge.h"
@@ -708,7 +709,7 @@ FindPlayerTrain(void)
 CPlayerPed *
 FindPlayerPed(void)
 {
-	return CWorld::Players[CWorld::PlayerInFocus].m_pPed;
+	return vccoop::FocusPlayer();
 }
 
 const CVector &
